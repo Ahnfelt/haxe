@@ -62,6 +62,15 @@
 			return regexp_matched_pos(r,0);
 	}
 
+	public function matchSub( s : String, pos : Int, len : Int = -1):Bool {
+			var p = regexp_match(r, s, pos, len < 0 ? s.length - pos : len);
+			if (p)
+				last = s;
+			else
+				last = null;
+			return p;
+	}
+	
 	public function split( s : String ) : Array<String> {
 			var pos = 0;
 			var len = s.length;
@@ -137,16 +146,28 @@
 			return b.toString();
 	}
 
-	public function customReplace( s : String, f : EReg -> String ) : String {
+	public function map( s : String, f : EReg -> String ) : String {
+		var offset = 0;
 		var buf = new StringBuf();
-		while( true ) {
-			if( !match(s) )
+		do {
+			if (offset >= s.length)
 				break;
-			buf.add(matchedLeft());
+			else if (!matchSub(s, offset)) {
+				buf.add(s.substr(offset));
+				break;
+			}
+			var p = regexp_matched_pos(r,0);
+			buf.add(s.substr(offset, p.pos - offset));
 			buf.add(f(this));
-			s = matchedRight();
-		}
-		buf.add(s);
+			if (p.len == 0) {
+				buf.add(s.substr(p.pos, 1));
+				offset = p.pos + 1;
+			}
+			else
+				offset = p.pos + p.len;
+		} while (global);
+		if (!global && offset < s.length)
+			buf.add(s.substr(offset));		
 		return buf.toString();
 	}
 
@@ -155,4 +176,13 @@
 	static var regexp_matched : Dynamic -> Int -> Dynamic = cpp.Lib.load("regexp","regexp_matched",2);
 	static var regexp_matched_pos : Dynamic -> Int -> { pos : Int, len : Int } = cpp.Lib.load("regexp","regexp_matched_pos",2);
 
+	#if !haxe3
+	public inline function customReplace( s : String, f : EReg -> String ) : String {
+		var old = global;
+		global = true;
+		var ret = map(s, f);
+		global = old;
+		return ret;
+	}
+	#end
 }

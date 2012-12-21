@@ -52,25 +52,25 @@ package unit;
 				return;
 		report(v+" not in "+Std.string(values),pos);
 	}
-	
+
 	function hf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos) {
 		Test.count++;
 		if (!Lambda.has(Type.getInstanceFields(c), n))
 			Test.report(Type.getClassName(c) + " should have member field " +n, pos);
 	}
-	
+
 	function nhf(c:Class<Dynamic>, n:String, ?pos:haxe.PosInfos) {
 		Test.count++;
 		if (Lambda.has(Type.getInstanceFields(c), n))
 			Test.report(Type.getClassName(c) + " should not have member field " +n, pos);
 	}
-	
+
 	function hsf(c:Class<Dynamic> , n:String, ?pos:haxe.PosInfos) {
 		Test.count++;
 		if (!Lambda.has(Type.getClassFields(c), n))
 			Test.report(Type.getClassName(c) + " should have static field " +n, pos);
 	}
-	
+
 	function nhsf(c:Class<Dynamic> , n:String, ?pos:haxe.PosInfos) {
 		Test.count++;
 		if (Lambda.has(Type.getClassFields(c), n))
@@ -182,7 +182,7 @@ package unit;
 		var stack :String = #if js
 			e.stack;
 		#else
-			haxe.Stack.toString(haxe.Stack.exceptionStack());
+			haxe.CallStack.toString(haxe.CallStack.exceptionStack());
 		#end
 		try msg = Std.string(e) catch( e : Dynamic ) {};
 		reportCount = 0;
@@ -227,8 +227,12 @@ package unit;
 			new TestType(),
 			new TestOrder(),
 			new TestStringTools(),
+			#if !no_pattern_matching
+			new TestMatch(),
+			#end
+			new TestSpecification(),
 			#if cs
-			new TestCSharp(),
+			//new TestCSharp(),
 			#end
 			#if java
 			new TestJava(),

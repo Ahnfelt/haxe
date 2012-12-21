@@ -262,7 +262,7 @@ and parse_import s p1 =
 				serror());
 		| [< '(Semicolon,p2) >] ->
 			p2, List.rev acc, INormal
-		| [< '(Binop OpAssign,_); '(Const (Ident name),_); '(Semicolon,p2) >] ->
+		| [< '(Kwd In,_); '(Const (Ident name),_); '(Semicolon,p2) >] ->
 			p2, List.rev acc, IAsName name
 		| [< >] ->
 			serror()
@@ -358,11 +358,16 @@ and parse_common_flags = parser
 	| [< '(Kwd Extern,_); l = parse_common_flags >] -> (HExtern, EExtern) :: l
 	| [< >] -> []
 
+and parse_meta_params pname s = match s with parser
+	| [< '(POpen,p) when p.pmin = pname.pmax; params = psep Comma expr; '(PClose,_); >] -> params
+	| [< >] -> []
+
+and parse_meta_entry = parser
+	[< '(At,_); name,p = meta_name; params = parse_meta_params p; s >] -> (name,params,p)
+
 and parse_meta = parser
-	| [< '(At,_); name,p = meta_name; s >] ->
-		(match s with parser
-		| [< '(POpen,_); params = psep Comma expr; '(PClose,_); s >] -> (name,params,p) :: parse_meta s
-		| [< >] -> (name,[],p) :: parse_meta s)
+	| [< entry = parse_meta_entry; s >] ->
+		entry :: parse_meta s
 	| [< >] -> []
 
 and meta_name = parser
@@ -494,11 +499,28 @@ and parse_enum s =
 	doc := None;
 	let meta = parse_meta s in
 	match s with parser
-	| [< name, p1 = any_enum_ident; doc = get_doc; s >] ->
-		match s with parser
-		| [< '(POpen,_); l = psep Comma parse_enum_param; '(PClose,_); p = semicolon; >] -> (name,doc,meta,l,punion p1 p)
-		| [< '(Semicolon,p) >] -> (name,doc,meta,[],punion p1 p)
-		| [< >] -> serror()
+	| [< name, p1 = any_enum_ident; doc = get_doc; params = parse_constraint_params; s >] ->
+		let args = (match s with parser
+		| [< '(POpen,_); l = psep Comma parse_enum_param; '(PClose,_) >] -> l
+		| [< >] -> []
+		) in
+		let t = (match s with parser
+		| [< '(DblDot,_); t = parse_complex_type >] -> Some t
+		| [< >] -> None
+		) in
+		let p2 = (match s with parser
+			| [< p = semicolon >] -> p
+			| [< >] -> serror()
+		) in
+		{
+			ec_name = name;
+			ec_doc = doc;
+			ec_meta = meta;
+			ec_args = args;
+			ec_params = params;
+			ec_type = t;
+			ec_pos = punion p1 p2;
+		}
 
 and parse_enum_param = parser
 	| [< '(Question,_); name, _ = ident; '(DblDot,_); t = parse_complex_type >] -> (name,true,t)
@@ -670,6 +692,8 @@ and inline_function = parser
 	| [< '(Kwd Function,p1) >] -> false, p1
 
 and expr = parser
+	| [< (name,params,p) = parse_meta_entry; s >] ->
+		(EMeta((name,params,p), expr s),p)
 	| [< '(BrOpen,p1); b = block1; '(BrClose,p2); s >] ->
 		let e = (b,punion p1 p2) in
 		(match b with
@@ -790,6 +814,8 @@ and expr = parser
 	| [< '(Dollar v,p); s >] -> expr_next (EConst (Ident ("$"^v)),p) s
 
 and expr_next e1 = parser
+	| [< (name,params,p) = parse_meta_entry; s >] ->
+		(EMeta((name,params,p), expr_next e1 s),p)
 	| [< '(Dot,p); s >] ->
 		if is_resuming p then display (EDisplay (e1,false),p);
 		(match s with parser
@@ -832,15 +858,19 @@ and expr_next e1 = parser
 		(EIn (e1,e2), punion (pos e1) (pos e2))
 	| [< >] -> e1
 
+and parse_guard = parser
+	| [< '(Kwd If,p1); '(POpen,_); e = expr; '(PClose,_); >] ->
+		e
+
 and parse_switch_cases eswitch cases = parser
 	| [< '(Kwd Default,p1); '(DblDot,_); s >] ->
 		let b = EBlock (try block [] s with Display e -> display (ESwitch (eswitch,cases,Some e),punion (pos eswitch) (pos e))) in
 		let l , def = parse_switch_cases eswitch cases s in
 		(match def with None -> () | Some (e,p) -> error Duplicate_default p);
 		l , Some (b,p1)
-	| [< '(Kwd Case,p1); el = psep Comma expr; '(DblDot,_); s >] ->
-		let b = EBlock (try block [] s with Display e -> display (ESwitch (eswitch,List.rev ((el,e) :: cases),None),punion (pos eswitch) (pos e))) in
-		parse_switch_cases eswitch ((el,(b,p1)) :: cases) s
+	| [< '(Kwd Case,p1); el = psep Comma expr; eg = popt parse_guard; '(DblDot,_); s >] ->
+		let b = EBlock (try block [] s with Display e -> display (ESwitch (eswitch,List.rev ((el,eg,e) :: cases),None),punion (pos eswitch) (pos e))) in
+		parse_switch_cases eswitch ((el,eg,(b,p1)) :: cases) s
 	| [< >] ->
 		List.rev cases , None
 
@@ -924,7 +954,7 @@ type small_type =
 	| TBool of bool
 	| TFloat of float
 	| TString of string
-	
+
 let parse ctx code =
 	let old = Lexer.save() in
 	let old_cache = !cache in
@@ -933,6 +963,7 @@ let parse ctx code =
 	doc := None;
 	in_macro := Common.defined ctx Common.Define.Macro;
 	Lexer.skip_header code;
+
 	let sraw = Stream.from (fun _ -> Some (Lexer.token code)) in
 	let rec next_token() = process_token (Lexer.token code)
 
@@ -991,7 +1022,8 @@ let parse ctx code =
 		in
 		let rec loop (e,p) =
 			match e with
-			| EConst (Ident i) -> (try TString (Common.raw_defined_value ctx i) with Not_found -> TNull)
+			| EConst (Ident i) ->
+				(try TString (Common.raw_defined_value ctx i) with Not_found -> TNull)
 			| EConst (String s) -> TString s
 			| EConst (Int i) -> TFloat (float_of_string i)
 			| EConst (Float f) -> TFloat (float_of_string f)
@@ -1018,7 +1050,7 @@ let parse ctx code =
 		in
 		let tk, e = parse_macro_cond false sraw in
 		let tk = (match tk with None -> Lexer.token code | Some tk -> tk) in
-		if is_true (loop e) then begin
+		if is_true (loop e) || (match fst e with EConst (Ident "macro") when Common.unique_full_path p.pfile = (!resume_display).pfile -> true | _ -> false) then begin
 			mstack := p :: !mstack;
 			tk
 		end else

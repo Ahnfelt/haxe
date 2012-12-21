@@ -173,7 +173,7 @@ class HtmlPrinter {
 
 	public function processPage(t) {
 		switch(t) {
-		case TPackage(p,full,list):
+		case TPackage(p,_,list):
 			processPackage(p,list);
 		default:
 			var head = '<a href="#" onclick="javascript:history.back(-1); return false" class="index">Back</a> | '+makeUrl(indexUrl,"Index","index");
@@ -202,8 +202,10 @@ class HtmlPrinter {
 				if( filtered(full,true) )
 					continue;
 				var isPrivate = name.charAt(0) == "_";
-				if( !isPrivate )
-					print('<li><a href="#" class="package" onclick="return toggle(\'$id\')">$name</a><div id="$id" class="package_content">', { id : full.split(".").join("_"), name : name });
+				if( !isPrivate ) {
+					var id = full.split(".").join("_");
+					print('<li><a href="#" class="package" onclick="return toggle(\'$id\')">$name</a><div id="$id" class="package_content">');
+				}
 				var old = curpackage;
 				curpackage = full;
 				processPackage(name,list);
@@ -222,7 +224,7 @@ class HtmlPrinter {
 
 	function processInfos(t : TypeInfos) {
 		if( t.module != null )
-			print('<div class="importmod">import $module</div>',{ module : t.module });
+			print('<div class="importmod">import ${t.module}</div>');
 		if( !t.platforms.isEmpty() ) {
 			print('<div class="platforms">Available in ');
 			display(t.platforms,output,", ");

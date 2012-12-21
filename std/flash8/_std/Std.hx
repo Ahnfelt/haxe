@@ -30,9 +30,8 @@
 		return untyped flash.Boot.__string_rec(s,"");
 	}
 
-	public static function int( x : Float ) : Int {
-		if( x < 0 ) return Math.ceil(x);
-		return Math.floor(x);
+	public static inline function int( x : Float ) : Int {
+		return (cast x) | 0;
 	}
 
 	public static function parseInt( x : String ) : Null<Int> untyped {
@@ -54,9 +53,11 @@
 		return untyped __random__(x);
 	}
 
+	#if !haxe3
 	@:macro public static function format( fmt : haxe.macro.Expr.ExprOf<String> ) : haxe.macro.Expr.ExprOf<String> {
 		return haxe.macro.Format.format(fmt);
 	}
+	#end
 
 	static function __init__() : Void untyped {
 		var g : Dynamic = _global;

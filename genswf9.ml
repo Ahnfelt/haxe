@@ -81,6 +81,7 @@ type context = {
 	swc : bool;
 	boot : path;
 	swf_protected : bool;
+	need_ctor_skip : bool;
 	mutable cur_class : tclass;
 	mutable debug : bool;
 	mutable last_line : int;
@@ -325,6 +326,8 @@ let property ctx p t =
 		| Statics { cl_path = [], "Math" } ->
 			(match p with
 			| "POSITIVE_INFINITY" | "NEGATIVE_INFINITY" | "NaN" -> ident p, Some KFloat, false
+			| "floor" | "ceil" | "round" -> ident p, Some KInt, false
+			| "ffloor" | "fceil" | "fround" -> ident (String.sub p 1 (String.length p - 1)), None, false
 			| _ -> ident p, None, false)
 		| _ -> ident p, None, false)
 	| TInst ({ cl_kind = KExtension _ } as c,params) ->
@@ -334,6 +337,28 @@ let property ctx p t =
 			ident p, Some (classify ctx (apply_params c.cl_types params f.cf_type)), false
 		with Not_found ->
 			ident p, None, false)
+	| TInst ({ cl_interface = true } as c,_) ->
+		(* lookup the interface in which the field was actually declared *)
+		let rec loop c =
+			try
+				(match PMap.find p c.cl_fields with
+				| { cf_kind = Var _ } -> raise Exit (* no vars in interfaces in swf9 *)
+				| _ -> c)
+			with Not_found ->
+				let rec loop2 = function
+					| [] -> raise Not_found
+					| (i,_) :: l ->
+						try loop i with Not_found -> loop2 l
+				in
+				loop2 c.cl_implements
+		in
+		(try
+			let c = loop c in
+			let ns = HMName (reserved p, HNNamespace (match c.cl_path with [],n -> n | l,n -> String.concat "." l ^ ":" ^ n)) in
+			ns, None, false
+		with Not_found | Exit ->
+			ident p, None, false)
+
 	| _ ->
 		ident p, None, false
 
@@ -753,7 +778,7 @@ let begin_fun ctx args tret el stat p =
 			hlf_nregs = DynArray.length ctx.infos.iregs + 1;
 			hlf_init_scope = 1;
 			hlf_max_scope = ctx.infos.imaxscopes + 1 + (if hasblock then 2 else if this_reg then 1 else 0);
-			hlf_code = Array.of_list (extra @ code);
+			hlf_code = MultiArray.of_array (Array.of_list (extra @ code));
 			hlf_trys = Array.of_list (List.map (fun t ->
 				{
 					hltc_start = t.tr_pos + delta;
@@ -1720,7 +1745,7 @@ let generate_method ctx fdata stat fmeta =
 
 let generate_construct ctx fdata c =
 	(* make all args optional to allow no-param constructor *)
-	let cargs = List.map (fun (v,c) ->
+	let cargs = if not ctx.need_ctor_skip then fdata.tf_args else List.map (fun (v,c) ->
 		let c = (match c with Some _ -> c | None ->
 			Some (match classify ctx v.v_type with
 			| KInt | KUInt -> TInt 0l
@@ -1732,7 +1757,7 @@ let generate_construct ctx fdata c =
 	) fdata.tf_args in
 	let f = begin_fun ctx cargs fdata.tf_type [ethis;fdata.tf_expr] false fdata.tf_expr.epos in
 	(* if skip_constructor, then returns immediatly *)
-	(match c.cl_kind with
+	if ctx.need_ctor_skip then (match c.cl_kind with
 	| KGenericInstance _ -> ()
 	| _ when not (Codegen.constructor_side_effects fdata.tf_expr) -> ()
 	| _ ->
@@ -2131,7 +2156,7 @@ let generate_class ctx c =
 	let st_meth_count = ref 0 in
 	let statics = List.rev (List.fold_left (fun acc f ->
 		let acc = generate_prop f acc (fun() -> incr st_meth_count; !st_meth_count) in
-		match generate_field_kind ctx f c true with 
+		match generate_field_kind ctx f c true with
 		| None -> acc
 		| Some k ->
 			let count = (match k with HFMethod _ -> st_meth_count | HFVar _ -> st_field_count | _ -> assert false) in
@@ -2335,6 +2360,7 @@ let generate_resource ctx name =
 let generate com boot_name =
 	let ctx = {
 		com = com;
+		need_ctor_skip = Common.has_feature com "Type.createEmptyInstance";
 		debug = com.Common.debug;
 		cur_class = null_class;
 		boot = ([],boot_name);

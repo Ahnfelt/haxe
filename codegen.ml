@@ -263,13 +263,37 @@ let generic_substitute_expr gctx e =
 	let rec build_expr e = map_expr_type build_expr (generic_substitute_type gctx) build_var e in
 	build_expr e
 
+let is_generic_parameter ctx c =
+	(* first check field parameters, then class parameters *)
+	try
+		ignore (List.assoc (snd c.cl_path) ctx.curfield.cf_params);
+		has_meta ":generic" ctx.curfield.cf_meta
+	with Not_found -> try
+		ignore(List.assoc (snd c.cl_path) ctx.type_params);
+		(match ctx.curclass.cl_kind with | KGeneric -> true | _ -> false);
+	with Not_found ->
+		false
+
+let has_ctor_constraint c = match c.cl_kind with
+	| KTypeParameter tl ->
+		List.exists (fun t -> match follow t with
+			| TAnon a when PMap.mem "new" a.a_fields -> true
+			| _ -> false
+		) tl;
+	| _ -> false
+
 let rec build_generic ctx c p tl =
 	let pack = fst c.cl_path in
 	let recurse = ref false in
 	let rec check_recursive t =
 		match follow t with
-		| TInst (c,tl) ->
-			(match c.cl_kind with KTypeParameter _ -> recurse := true | _ -> ());
+		| TInst (c2,tl) ->
+			(match c2.cl_kind with
+			| KTypeParameter tl ->
+				if not (is_generic_parameter ctx c2) && has_ctor_constraint c2 then
+					error "Type parameters with a constructor cannot be used non-generically" p;
+				recurse := true
+			| _ -> ());
 			List.iter check_recursive tl;
 		| _ ->
 			()
@@ -567,7 +591,7 @@ let save_class_state ctx t = match t with
 	| _ ->
 		()
 
-		
+
 (* Checks if a private class' path clashes with another path *)
 let check_private_path ctx t = match t with
 	| TClassDecl c when c.cl_private ->
@@ -578,19 +602,8 @@ let check_private_path ctx t = match t with
 
 (* Removes generic base classes *)
 let remove_generic_base ctx t = match t with
-	| TClassDecl c when c.cl_kind = KGeneric && has_meta ":?genericT" c.cl_meta ->
-		(* TODO: we have to get the detection right eventually *)
+	| TClassDecl c when c.cl_kind = KGeneric && has_ctor_constraint c ->
 		c.cl_extern <- true
-(* 		(try
-			let (_,_,prec) = get_meta ":?genericRec" c.cl_meta in
-			(try
-				let (_,_,pnew) = get_meta ":?genericT" c.cl_meta in
-				display_error ctx ("Class " ^ (s_type_path c.cl_path) ^ " was used recursively and cannot use its type parameter") prec;
-				error "Type parameter usage was here" pnew
-			with Not_found ->
-				());
-		with Not_found ->
-			c.cl_extern <- true); *)
 	| _ ->
 		()
 
@@ -648,7 +661,7 @@ let add_rtti ctx t =
 	| _ ->
 		()
 
-(* Removes extern and macro fields *)
+(* Removes extern and macro fields, also checks for Void fields *)
 let remove_extern_fields ctx t = match t with
 	| TClassDecl c ->
 		let do_remove f =
@@ -710,9 +723,9 @@ let add_field_inits ctx t =
 				match cf.cf_expr with
 				| None -> assert false
 				| Some e ->
-					let lhs = mk (TField(ethis,cf.cf_name)) e.etype e.epos in
+					let lhs = mk (TField(ethis,cf.cf_name)) cf.cf_type e.epos in
 					cf.cf_expr <- None;
-					let eassign = mk (TBinop(OpAssign,lhs,e)) lhs.etype e.epos in
+					let eassign = mk (TBinop(OpAssign,lhs,e)) e.etype e.epos in
 					if Common.defined ctx.com Define.As3 then begin
 						let echeck = mk (TBinop(OpEq,lhs,(mk (TConst TNull) lhs.etype e.epos))) ctx.com.basic.tbool e.epos in
 						mk (TIf(echeck,eassign,None)) eassign.etype e.epos
@@ -763,6 +776,17 @@ let add_meta_field ctx t = match t with
 let check_remove_metadata ctx t = match t with
 	| TClassDecl c ->
 		c.cl_implements <- List.filter (fun (c,_) -> not (has_meta ":remove" c.cl_meta)) c.cl_implements;
+	| _ ->
+		()
+
+(* Checks for Void class fields *)
+let check_void_field ctx t = match t with
+	| TClassDecl c ->
+		let check f =
+			match follow f.cf_type with TAbstract({a_path=[],"Void"},_) -> error "Fields of type Void are not allowed" f.cf_pos | _ -> ();
+		in
+		List.iter check c.cl_ordered_fields;
+		List.iter check c.cl_ordered_statics;
 	| _ ->
 		()
 
@@ -1057,7 +1081,10 @@ let rename_local_vars com e =
 		done;
 		v.v_name <- v.v_name ^ string_of_int !count;
 	in
-	let declare v =
+	let declare v p =
+		(match follow v.v_type with
+			| TAbstract ({a_path = [],"Void"},_) -> error "Arguments and variables of type Void are not allowed" p
+			| _ -> ());
 		(* chop escape char for all local variables generated *)
 		if String.unsafe_get v.v_name 0 = String.unsafe_get gen_local_prefix 0 then v.v_name <- "_g" ^ String.sub v.v_name 1 (String.length v.v_name - 1);
 		let look_vars = (if not cfg.pf_captured_scope && v.v_capture then !all_vars else !vars) in
@@ -1104,31 +1131,31 @@ let rename_local_vars com e =
 	let rec loop e =
 		match e.eexpr with
 		| TVars l ->
-			List.iter (fun (v,e) ->
-				if not cfg.pf_locals_scope then declare v;
-				(match e with None -> () | Some e -> loop e);
-				if cfg.pf_locals_scope then declare v;
+			List.iter (fun (v,eo) ->
+				if not cfg.pf_locals_scope then declare v e.epos;
+				(match eo with None -> () | Some e -> loop e);
+				if cfg.pf_locals_scope then declare v e.epos;
 			) l
 		| TFunction tf ->
 			let old = save() in
-			List.iter (fun (v,_) -> declare v) tf.tf_args;
+			List.iter (fun (v,_) -> declare v e.epos) tf.tf_args;
 			loop tf.tf_expr;
 			old()
 		| TBlock el ->
 			let old = save() in
 			List.iter loop el;
 			old()
-		| TFor (v,it,e) ->
+		| TFor (v,it,e1) ->
 			loop it;
 			let old = save() in
-			declare v;
-			loop e;
+			declare v e.epos;
+			loop e1;
 			old()
 		| TTry (e,catchs) ->
 			loop e;
 			List.iter (fun (v,e) ->
 				let old = save() in
-				declare v;
+				declare v e.epos;
 				check_type v.v_type;
 				loop e;
 				old()
@@ -1139,7 +1166,7 @@ let rename_local_vars com e =
 				let old = save() in
 				(match vars with
 				| None -> ()
-				| Some l ->	List.iter (function None -> () | Some v -> declare v) l);
+				| Some l ->	List.iter (function None -> () | Some v -> declare v e.epos) l);
 				loop e;
 				old();
 			) cases;

@@ -199,6 +199,7 @@ and tenum_field = {
 	ef_pos : Ast.pos;
 	ef_doc : Ast.documentation;
 	ef_index : int;
+	ef_params : type_params;
 	mutable ef_meta : metadata;
 }
 
@@ -272,11 +273,6 @@ and module_kind =
 	| MCode
 	| MMacro
 	| MFake
-
-type generic_parameter_kind =
-	| GPNone
-	| GPField of tclass_field
-	| GPClass of tclass
 
 let alloc_var =
 	let uid = ref 0 in
@@ -956,6 +952,9 @@ let rec unify a b =
 		unify_types a b tl1 tl2
 	| TAbstract (a1,tl1) , TAbstract (a2,tl2) when a1 == a2 ->
 		unify_types a b tl1 tl2
+	| TAbstract ({a_path=[],"Void"},_) , _
+	| _ , TAbstract ({a_path=[],"Void"},_) ->
+		error [cannot_unify a b]
 	| TAbstract (a1,tl1) , TAbstract (a2,tl2) ->
 		if not (List.exists (fun t ->
 			let t = apply_params a1.a_types tl1 t in

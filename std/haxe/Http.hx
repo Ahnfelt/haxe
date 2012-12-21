@@ -95,8 +95,8 @@ class Http {
 	public function request( post : Bool ) : Void {
 		var me = this;
 	#if js
-		var r = new js.XMLHttpRequest();
-		var onreadystatechange = function() {
+		var r = js.Browser.createXMLHttpRequest();
+		var onreadystatechange = function(_) {
 			if( r.readyState != 4 )
 				return;
 			var s = try r.status catch( e : Dynamic ) null;
@@ -106,9 +106,9 @@ class Http {
 				me.onStatus(s);
 			if( s != null && s >= 200 && s < 400 )
 				me.onData(r.responseText);
+			else if ( s == null )
+				me.onError("Failed to connect or resolve host")
 			else switch( s ) {
-			case null:
-				me.onError("Failed to connect or resolve host");
 			case 12029:
 				me.onError("Failed to connect to host");
 			case 12007:
@@ -149,7 +149,7 @@ class Http {
 			r.setRequestHeader(h,headers.get(h));
 		r.send(uri);
 		if( !async )
-			onreadystatechange();
+			onreadystatechange(null);
 	#elseif flash9
 		var loader = new flash.net.URLLoader();
 		loader.addEventListener( "complete", function(e){

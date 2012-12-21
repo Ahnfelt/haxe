@@ -61,6 +61,15 @@
 	public function matchedPos() : { pos : Int, len : Int } {
 		return regexp_matched_pos(r,0);
 	}
+	
+	public function matchSub( s : String, pos : Int, len : Int = -1):Bool {
+		var p = regexp_match(r, untyped s.__s, pos, len < 0 ? s.length - pos : len);
+		if( p )
+			last = s;
+		else
+			last = null;
+		return p;
+	}		
 
 	public function split( s : String ) : Array<String> {
 		var pos = 0;
@@ -137,30 +146,55 @@
 		return b.toString();
 	}
 
-	public function customReplace( s : String, f : EReg -> String ) : String {
-		var b = new StringBuf();
-		var pos = 0;
-		var len = s.length;
-		var first = true;
-		last = s;
+	//public function map( s : String, f : EReg -> String ) : String {
+		//var b = new StringBuf();
+		//var pos = 0;
+		//var len = s.length;
+		//var first = true;
+		//last = s;
+		//do {
+			//if( !regexp_match(r,untyped s.__s,pos,len) )
+				//break;
+			//var p = regexp_matched_pos(r,0);
+			//if( p.len == 0 && !first ) {
+				//if( p.pos == s.length )
+					//break;
+				//p.pos += 1;
+			//}
+			//b.addSub(s,pos,p.pos-pos);
+			//b.add(f(this));
+			//var tot = p.pos + p.len - pos;
+			//pos += tot;
+			//len -= tot;
+			//first = false;
+		//} while( global );
+		//b.addSub(s,pos,len);
+		//return b.toString();
+	//}
+	
+	public function map( s : String, f : EReg -> String ) : String {
+		var offset = 0;
+		var buf = new StringBuf();
 		do {
-			if( !regexp_match(r,untyped s.__s,pos,len) )
+			if (offset >= s.length)
 				break;
-			var p = regexp_matched_pos(r,0);
-			if( p.len == 0 && !first ) {
-				if( p.pos == s.length )
-					break;
-				p.pos += 1;
+			else if (!matchSub(s, offset)) {
+				buf.add(s.substr(offset));
+				break;
 			}
-			b.addSub(s,pos,p.pos-pos);
-			b.add(f(this));
-			var tot = p.pos + p.len - pos;
-			pos += tot;
-			len -= tot;
-			first = false;
-		} while( true );
-		b.addSub(s,pos,len);
-		return b.toString();
+			var p = regexp_matched_pos(r,0);
+			buf.add(s.substr(offset, p.pos - offset));
+			buf.add(f(this));
+			if (p.len == 0) {
+				buf.add(s.substr(p.pos, 1));
+				offset = p.pos + 1;
+			}
+			else
+				offset = p.pos + p.len;
+		} while (global);
+		if (!global && offset < s.length)
+			buf.add(s.substr(offset));		
+		return buf.toString();
 	}
 
 	static var regexp_new_options = neko.Lib.load("regexp","regexp_new_options",2);
@@ -168,4 +202,13 @@
 	static var regexp_matched = neko.Lib.load("regexp","regexp_matched",2);
 	static var regexp_matched_pos : Dynamic -> Int -> { pos : Int, len : Int } = neko.Lib.load("regexp","regexp_matched_pos",2);
 
+	#if !haxe3
+	public inline function customReplace( s : String, f : EReg -> String ) : String {
+		var old = global;
+		global = true;
+		var ret = map(s, f);
+		global = old;
+		return ret;
+	}
+	#end
 }

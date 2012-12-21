@@ -55,6 +55,26 @@
 		return { pos : r.m.index, len : r.m[0].length };
 	}
 
+	public function matchSub( s : String, pos : Int, len : Int = -1):Bool {
+		return if (r.global) {
+			r.lastIndex = pos;
+			r.m = r.exec(len < 0 ? s : s.substr(0, pos + len));
+			var b = r.m != null;
+			if (b) {
+				r.s = s;
+			}
+			b;
+		} else {
+			// TODO: check some ^/$ related corner cases
+			var b = match( len < 0 ? s.substr(pos) : s.substr(pos,len) );
+			if (b) {
+				r.s = s;
+				r.m.index += pos;
+			}
+			b;
+		}
+	}	
+	
 	public function split( s : String ) : Array<String> {
 		// we can't use directly s.split because it's ignoring the 'g' flag
 		var d = "#__delim__#";
@@ -65,17 +85,38 @@
 		return untyped s.replace(r,by);
 	}
 
-	public function customReplace( s : String, f : EReg -> String ) : String {
+	public function map( s : String, f : EReg -> String ) : String {
+		var offset = 0;
 		var buf = new StringBuf();
-		while( true ) {
-			if( !match(s) )
+		do {
+			if (offset >= s.length)
 				break;
-			buf.add(matchedLeft());
+			else if (!matchSub(s, offset)) {
+				buf.add(s.substr(offset));
+				break;
+			}
+			var p = matchedPos();
+			buf.add(s.substr(offset, p.pos - offset));
 			buf.add(f(this));
-			s = matchedRight();
-		}
-		buf.add(s);
+			if (p.len == 0) {
+				buf.add(s.substr(p.pos, 1));
+				offset = p.pos + 1;
+			}
+			else
+				offset = p.pos + p.len;
+		} while (r.global);
+		if (!r.global && offset < s.length)
+			buf.add(s.substr(offset));
 		return buf.toString();
 	}
 
+	#if !haxe3
+	public inline function customReplace( s : String, f : EReg -> String ) : String {
+		var old = r.global;
+		r.global = true;
+		var ret = map(s, f);
+		r.global = old;
+		return ret;
+	}
+	#end
 }

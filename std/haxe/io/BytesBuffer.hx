@@ -24,7 +24,7 @@ package haxe.io;
 class BytesBuffer {
 
 	#if neko
-	var b : Void; // neko string buffer
+	var b : Dynamic; // neko string buffer
 	#elseif flash9
 	var b : flash.utils.ByteArray;
 	#elseif php
@@ -122,7 +122,7 @@ class BytesBuffer {
 	**/
 	public function getBytes() : Bytes untyped {
 		#if neko
-		var str = StringBuf.__string(b);
+		var str = StringBuf.__to_string(b);
 		var bytes = new Bytes(__dollar__ssize(str),str);
 		#elseif flash9
 		var bytes = new Bytes(b.length,b);

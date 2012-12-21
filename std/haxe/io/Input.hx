@@ -56,7 +56,7 @@ class Input {
 			#elseif cpp
 				b[pos] = untyped readByte();
 			#else
-				b[pos] = readByte();
+				b[pos] = cast readByte();
 			#end
 			pos++;
 			k--;
@@ -172,18 +172,18 @@ class Input {
 			var helper = helper;
 			helper.order(bigEndian ? java.nio.ByteOrder.BIG_ENDIAN : java.nio.ByteOrder.LITTLE_ENDIAN);
 
-			helper.put(0, readByte());
-			helper.put(1, readByte());
-			helper.put(2, readByte());
-			helper.put(3, readByte());
+			helper.put(0, cast readByte());
+			helper.put(1, cast readByte());
+			helper.put(2, cast readByte());
+			helper.put(3, cast readByte());
 
 			return helper.getFloat(0);
 		#else
 			var bytes = [];
-			bytes.push(readByte());
-			bytes.push(readByte());
-			bytes.push(readByte());
-			bytes.push(readByte());
+			bytes.push(cast readByte());
+			bytes.push(cast readByte());
+			bytes.push(cast readByte());
+			bytes.push(cast readByte());
 			if (bigEndian)
 				bytes.reverse();
 			var sign = 1 - ((bytes[0] >> 7) << 1);
@@ -253,14 +253,14 @@ class Input {
 		var helper = helper;
 		helper.order(bigEndian ? java.nio.ByteOrder.BIG_ENDIAN : java.nio.ByteOrder.LITTLE_ENDIAN);
 
-		helper.put(0, readByte());
-		helper.put(1, readByte());
-		helper.put(2, readByte());
-		helper.put(3, readByte());
-		helper.put(4, readByte());
-		helper.put(5, readByte());
-		helper.put(6, readByte());
-		helper.put(7, readByte());
+		helper.put(0, cast readByte());
+		helper.put(1, cast readByte());
+		helper.put(2, cast readByte());
+		helper.put(3, cast readByte());
+		helper.put(4, cast readByte());
+		helper.put(5, cast readByte());
+		helper.put(6, cast readByte());
+		helper.put(7, cast readByte());
 
 		return helper.getDouble(0);
 		#else
@@ -383,25 +383,13 @@ class Input {
 	static var _double_of_bytes = cpp.Lib.load("std","double_of_bytes",2);
 #end
 
-#if flash
-	function getDoubleSig(bytes:Array<Int>) : Int
+#if (flash || js)
+	function getDoubleSig(bytes:Array<Int>)
     {
-        return untyped
-        {
-            Std.int(((((bytes[1]&0xF) << 16) | (bytes[2] << 8) | bytes[3] ) * Math.pow(2, 32))) +
-            Std.int(((bytes[4] >> 7) * Math.pow(2,31))) +
-            Std.int((((bytes[4]&0x7F) << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]));
-        };
-    }
-#elseif js
-	function getDoubleSig(bytes:Array<Int>) : Int
-    {
-        return untyped
-        {
-            Std.parseInt(((((bytes[1]&0xF) << 16) | (bytes[2] << 8) | bytes[3] ) * Math.pow(2, 32)).toString()) +
-            Std.parseInt(((bytes[4] >> 7) * Math.pow(2,31)).toString()) +
-            Std.parseInt((((bytes[4]&0x7F) << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]).toString());
-        };
+        return (((bytes[1]&0xF) << 16) | (bytes[2] << 8) | bytes[3] ) * 4294967296. +
+            (bytes[4] >> 7) * 2147483648 +
+            (((bytes[4]&0x7F) << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]);
     }
 #end
+
 }

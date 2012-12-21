@@ -127,6 +127,7 @@ let build_class com c file =
 					| _ :: l -> loop l
 				in
 				loop (List.rev ns)
+			| HMPath _ -> i
 			| _ -> assert false
 		) in
 		HImplements (make_tpath i)
@@ -302,7 +303,15 @@ let build_class com c file =
 				match f.cff_kind with
 				| FVar (Some (CTPath { tpackage = []; tname = ("String" | "Int" | "UInt") as tname }),None) when List.mem AStatic f.cff_access ->
 					if !real_type = "" then real_type := tname else if !real_type <> tname then raise Exit;
-					(f.cff_name,None,[],[],pos) :: loop l
+					{
+						ec_name = f.cff_name;
+						ec_pos = pos;
+						ec_args = [];
+						ec_params = [];
+						ec_meta = [];
+						ec_doc = None;
+						ec_type = None;
+					} :: loop l
 				| FFun { f_args = [] } when f.cff_name = "new" -> loop l
 				| _ -> raise Exit
 		in
@@ -384,21 +393,21 @@ let remove_debug_infos as3 =
 			m2
 	and loop_function f =
 		let cur = ref 0 in
-		let positions = Array.map (fun op ->
+		let positions = MultiArray.map (fun op ->
 			let p = !cur in
 			(match op with
 			| HDebugReg _ | HDebugLine _ | HDebugFile _ | HBreakPointLine _ | HTimestamp -> ()
 			| _ -> incr cur);
 			p
 		) f.hlf_code in
-		let positions = Array.concat [positions;[|!cur|]] in
-		let code = DynArray.create() in
-		Array.iteri (fun pos op ->
+		MultiArray.add positions (!cur);
+		let code = MultiArray.create() in
+		MultiArray.iteri (fun pos op ->
 			match op with
 			| HDebugReg _ | HDebugLine _ | HDebugFile _ | HBreakPointLine _ | HTimestamp -> ()
 			| _ ->
 				let p delta =
-					positions.(pos + delta) - DynArray.length code
+					MultiArray.get positions (pos + delta) - MultiArray.length code
 				in
 				let op = (match op with
 				| HJump (j,delta) -> HJump (j, p delta)
@@ -407,15 +416,15 @@ let remove_debug_infos as3 =
 				| HCallStatic (m,args) -> HCallStatic (loop_method m,args)
 				| HClassDef c -> HClassDef c (* mutated *)
 				| _ -> op) in
-				DynArray.add code op
+				MultiArray.add code op
 		) f.hlf_code;
-		f.hlf_code <- DynArray.to_array code;
+		f.hlf_code <- code;
 		f.hlf_trys <- Array.map (fun t ->
 			{
 				t with
-				hltc_start = positions.(t.hltc_start);
-				hltc_end = positions.(t.hltc_end);
-				hltc_handle = positions.(t.hltc_handle);
+				hltc_start = MultiArray.get positions t.hltc_start;
+				hltc_end = MultiArray.get positions t.hltc_end;
+				hltc_handle = MultiArray.get positions t.hltc_handle;
 			}
 		) f.hlf_trys;
 		f
@@ -439,7 +448,13 @@ let parse_swf com file =
 	end else
 		IO.input_channel (open_in_bin file)
 	in
-	let h, tags = (try Swf.parse ch with _ -> failwith ("The input swf " ^ file ^ " is corrupted")) in
+	let h, tags = try
+		Swf.parse ch
+	with Out_of_memory ->
+		failwith ("Out of memory while parsing " ^ file)
+	| _ ->
+		failwith ("The input swf " ^ file ^ " is corrupted")
+	in
 	IO.close_in ch;
 	List.iter (fun t ->
 		match t.tdata with
@@ -450,7 +465,7 @@ let parse_swf com file =
 	t();
 	(h,tags)
 
-let add_swf_lib com file =
+let add_swf_lib com file extern =
 	let swf_data = ref None in
 	let swf_classes = ref None in
 	let getSWF = (fun() ->
@@ -475,7 +490,7 @@ let add_swf_lib com file =
 		| Some c -> Some (file, build_class com c file)
 	in
 	com.load_extern_type <- com.load_extern_type @ [build];
-	com.swf_libs <- (file,getSWF,extract) :: com.swf_libs
+	if not extern then com.swf_libs <- (file,getSWF,extract) :: com.swf_libs
 
 (* ------------------------------- *)
 
@@ -738,6 +753,7 @@ let build_swf8 com codeclip exports =
 type file_format =
 	| BJPG
 	| BPNG
+	| BGIF
 	| SWAV
 	| SMP3
 
@@ -748,6 +764,7 @@ let detect_format data p =
 	| 'R', 'I', 'F' -> SWAV
 	| 'I', 'D', '3' -> SMP3
 	| '\xFF', '\xFB', _ -> SMP3
+	| 'G', 'I', 'F' -> BGIF
 	| _ ->
 		error "Unknown file format" p
 
@@ -814,6 +831,10 @@ let build_swf9 com file swc =
 								let h = Png.header png in
 								(match h.Png.png_color with
 								| Png.ClTrueColor (Png.TBits8,Png.NoAlpha) ->
+									if h.Png.png_width * h.Png.png_height * 4 > Sys.max_string_length then begin
+										com.warning "Flash will loose some color information for this file, add alpha channel to preserve it" p;
+										raise Exit;
+									end;
 									let data = Extc.unzip (Png.data png) in
 									let raw_data = Png.filter png data in
 									let cmp_data = Extc.zip raw_data in
@@ -867,7 +888,9 @@ let build_swf9 com file swc =
 								let i = IO.input_string data in
 								if IO.nread i 4 <> "RIFF" then raise Exit;
 								ignore(IO.nread i 4); (* size *)
-								if IO.nread i 4 <> "WAVE" || IO.nread i 4 <> "fmt " || IO.read_i32 i <> 0x10 then raise Exit;
+								if IO.nread i 4 <> "WAVE" || IO.nread i 4 <> "fmt " then raise Exit;
+								let chunk_size = IO.read_i32 i in
+								if not (chunk_size = 0x10 || chunk_size = 0x12 || chunk_size = 0x40) then failwith ("Unsupported chunk size " ^ string_of_int chunk_size);
 								if IO.read_ui16 i <> 1 then failwith "Not a PCM file";
 								let chan = IO.read_ui16 i in
 								if chan > 2 then failwith "Too many channels";
@@ -875,6 +898,7 @@ let build_swf9 com file swc =
 								ignore(IO.read_i32 i);
 								ignore(IO.read_i16 i);
 								let bits = IO.read_ui16 i in
+								if chunk_size <> 0x10 then ignore(IO.nread i (chunk_size - 0x10));
 								if IO.nread i 4 <> "data" then raise Exit;
 								let data_size = IO.read_i32 i in
 								let data = IO.nread i data_size in
@@ -886,19 +910,15 @@ let build_swf9 com file swc =
 							)
 						| SMP3 ->
 							(try
-								let i = IO.input_string data in
-								if IO.read_byte i <> 0xFF then raise Exit;
-								let ver = ((IO.read_byte i) lsr 3) land 3 in
-								let sampling = [|11025;0;22050;44100|].(ver) in
-								ignore(IO.read_byte i);
-								let mono = (IO.read_byte i) lsr 6 = 3 in
+								let sampling = ref 0 in
+								let mono = ref false in
 								let samples = ref 0 in
 								let i = IO.input_string data in
 								let rec read_frame() =
 									match (try IO.read_byte i with IO.No_more_input -> -1) with
 									| -1 ->
 										()
-									| 73 ->
+									| 0x49 ->
 										(* ID3 *)
 										if IO.nread i 2 <> "D3" then raise Exit;
 										ignore(IO.read_ui16 i); (* version *)
@@ -909,9 +929,14 @@ let build_swf9 com file swc =
 										let size = size lsl 7 lor (IO.read_byte i land 0x7F) in
 										ignore(IO.nread i size); (* id3 data *)
 										read_frame()
+									| 0x54 ->
+										(* TAG and TAG+ *)
+										if IO.nread i 3 = "AG+" then ignore(IO.nread i 223) else ignore(IO.nread i 124);
+										read_frame()
 									| 0xFF ->
 										let infos = IO.read_byte i in
 										let ver = (infos lsr 3) land 3 in
+										sampling := [|11025;0;22050;44100|].(ver);
 										let layer = (infos lsr 1) land 3 in
 										let bits = IO.read_byte i in
 										let bitrate = (if ver = 3 then [|0;32;40;48;56;64;80;96;112;128;160;192;224;256;320;-1|] else [|0;8;16;24;32;40;48;56;64;80;96;112;128;144;160;-1|]).(bits lsr 4) in
@@ -922,7 +947,7 @@ let build_swf9 com file swc =
 											[|-1;-1;-1;-1|]
 										|].((bits lsr 2) land 2).(ver) in
 										let pad = (bits lsr 1) land 1 in
-										ignore(IO.read_byte i);
+										mono := (IO.read_byte i) lsr 6 = 3;
 										let bpp = (if ver = 3 then 144 else 72) in
 										let size = ((bpp * bitrate * 1000) / srate) + pad - 4 in
 										ignore(IO.nread i size);
@@ -932,7 +957,7 @@ let build_swf9 com file swc =
 										raise Exit
 								in
 								read_frame();
-								make_flags 2 mono sampling 16, (!samples), ("\x00\x00" ^ data)
+								make_flags 2 !mono !sampling 16, (!samples), ("\x00\x00" ^ data)
 							with Exit | IO.No_more_input | IO.Overflow _ ->
 								error "Invalid MP3 file" p
 							| Failure msg ->
@@ -968,6 +993,7 @@ let merge com file priority (h1,tags1) (h2,tags2) =
 		| TRemoveObject _ -> use_stage
 		| TShowFrame -> incr nframe; use_stage
 		| TFilesAttributes _ | TEnableDebugger2 _ | TScenes _ -> false
+		| TMetaData _ -> not (Common.defined com Define.SwfMetadata)
 		| TSetBgColor _ -> priority
 		| TExport el when !nframe = 0 && com.flash_version >= 9. ->
 			let el = List.filter (fun e ->
@@ -1066,18 +1092,44 @@ let generate com swf_header =
 	let tags = if isf9 then build_swf9 com file swc else build_swf8 com codeclip exports in
 	let header, bg = (match swf_header with None -> default_header com | Some h -> convert_header com h) in
 	let bg = tag (TSetBgColor { cr = bg lsr 16; cg = (bg lsr 8) land 0xFF; cb = bg land 0xFF }) in
-	let debug = (if isf9 && Common.defined com Define.Fdb then [tag (TEnableDebugger2 (0,""))] else []) in
+	let swf_debug_password = try
+		Digest.to_hex(Digest.string (Common.defined_value com Define.SwfDebugPassword))
+	with Not_found ->
+		""
+	in
+	let debug = (if isf9 && Common.defined com Define.Fdb then [tag (TEnableDebugger2 (0, swf_debug_password))] else []) in
+	let meta_data =
+		try
+			let file = Common.defined_value com Define.SwfMetadata in
+			let file = try Common.find_file com file with Not_found -> file in
+			let data = try Std.input_file ~bin:true file with Sys_error _ -> failwith ("Metadata resource file not found : " ^ file) in
+			[tag(TMetaData (data))]
+		with Not_found ->
+			[]
+	in
 	let fattr = (if com.flash_version < 8. then [] else
 		[tag (TFilesAttributes {
 			fa_network = Common.defined com Define.NetworkSandbox;
 			fa_as3 = isf9;
-			fa_metadata = false;
-			fa_gpu = false;
-			fa_direct_blt = false;
+			fa_metadata = meta_data <> [];
+			fa_gpu = com.flash_version > 9. && Common.defined com Define.SwfGpu;
+			fa_direct_blt = com.flash_version > 9. && Common.defined com Define.SwfDirectBlit;
 		})]
 	) in
 	let fattr = if Common.defined com Define.AdvancedTelemetry then fattr @ [tag (TUnknown (0x5D,"\x00\x00"))] else fattr in
-	let swf = header, fattr @ bg :: debug @ tags @ [tag TShowFrame] in
+	let preframe, header =
+		if Common.defined com Define.SwfPreloaderFrame then
+			[tag TShowFrame], {h_version=header.h_version; h_size=header.h_size; h_frame_count=header.h_frame_count+1; h_fps=header.h_fps; h_compressed=header.h_compressed; }
+		else
+			[], header in
+	let swf_script_limits = try
+		let s = Common.defined_value com Define.SwfScriptTimeout in
+		let i = try int_of_string s with _ -> error "Argument to swf_script_timeout must be an integer" Ast.null_pos in
+		[tag(TScriptLimits (256, if i < 0 then 0 else if i > 65535 then 65535 else i))]
+	with Not_found ->
+		[]
+	in
+	let swf = header, fattr @ meta_data @ bg :: debug @ swf_script_limits @ preframe @ tags @ [tag TShowFrame] in
   (* merge swf libraries *)
 	let priority = ref (swf_header = None) in
 	let swf = List.fold_left (fun swf (file,lib,cl) ->

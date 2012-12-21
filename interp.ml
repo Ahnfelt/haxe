@@ -516,7 +516,11 @@ let neko =
 	in
 
 	(* a bit tricky since load "val_true" does not work as expected on Windows *)
-	let unser = loadprim "std@unserialize" 2 in
+	let unser = try loadprim "std@unserialize" 2 with _ -> ("",null,0) in
+
+	(* did we fail to load std.ndll ? *)
+	if (match unser with ("",_,_) -> true | _ -> false) then None else
+
 	let val_true = call_raw_prim unser [|alloc_string "T";loader|] in
 	let val_false = call_raw_prim unser [|alloc_string "F";loader|] in
 	let val_null = call_raw_prim unser [|alloc_string "N";loader|] in
@@ -1316,8 +1320,9 @@ let std_lib =
 			| _ -> false)
 		);
 		"double_bytes", Fun2 (fun f big ->
-			match f, big with
-			| VFloat f, VBool big ->
+			let f = (match f with VFloat f -> f | VInt i -> float_of_int i | _ -> error()) in
+			match big with
+			| VBool big ->
 				let ch = IO.output_string() in
 				if big then IO.BigEndian.write_double ch f else IO.write_double ch f;
 				VString (IO.close_out ch)
@@ -1325,8 +1330,9 @@ let std_lib =
 				error()
 		);
 		"float_bytes", Fun2 (fun f big ->
-			match f, big with
-			| VFloat f, VBool big ->
+			let f = (match f with VFloat f -> f | VInt i -> float_of_int i | _ -> error()) in
+			match big with
+			| VBool big ->
 				let ch = IO.output_string() in
 				let i = Int32.bits_of_float f in
 				if big then IO.BigEndian.write_real_i32 ch i else IO.write_real_i32 ch i;
@@ -1584,7 +1590,7 @@ let std_lib =
 		);
 		"sys_sleep", Fun1 (fun f ->
 			match f with
-			| VFloat f -> Unix.sleep (int_of_float (ceil f)); VNull
+			| VFloat f -> ignore(Unix.select [] [] [] f); VNull
 			| _ -> error()
 		);
 		"set_time_locale", Fun1 (fun l ->
@@ -1611,7 +1617,7 @@ let std_lib =
 			VBool (Sys.word_size = 64)
 		);
 		"sys_command", Fun1 (fun cmd ->
-			VInt (Sys.command (vstring cmd))
+			VInt ((get_ctx()).com.run_command (vstring cmd))
 		);
 		"sys_exit", Fun1 (fun code ->
 			exit (vint code);
@@ -2360,7 +2366,7 @@ let macro_lib =
 			| VString file ->
 				let com = ccom() in
 				(match com.platform with
-				| Flash -> Genswf.add_swf_lib com file
+				| Flash -> Genswf.add_swf_lib com file false
 				| _ -> failwith "Unsupported platform");
 				VNull
 			| _ ->
@@ -3633,9 +3639,10 @@ and encode_expr e =
 			| EWhile (econd,e,flag) ->
 				16, [loop econd;loop e;VBool (match flag with NormalWhile -> true | DoWhile -> false)]
 			| ESwitch (e,cases,eopt) ->
-				17, [loop e;enc_array (List.map (fun (ecl,e) ->
+				17, [loop e;enc_array (List.map (fun (ecl,eg,e) ->
 					enc_obj [
 						"values",enc_array (List.map loop ecl);
+						"guard",null loop eg;
 						"expr",loop e
 					]
 				) cases);null loop eopt]
@@ -3893,7 +3900,7 @@ let decode_expr v =
 			EWhile (loop e1,loop e2,if flag then NormalWhile else DoWhile)
 		| 17, [e;cases;eo] ->
 			let cases = List.map (fun c ->
-				(List.map loop (dec_array (field c "values")),loop (field c "expr"))
+				(List.map loop (dec_array (field c "values")),opt loop (field c "guard"),loop (field c "expr"))
 			) (dec_array cases) in
 			ESwitch (loop e,cases,opt loop eo)
 		| 18, [e;catches] ->
@@ -4001,20 +4008,22 @@ let rec encode_mtype t fields =
 		"isPrivate", VBool i.mt_private;
 		"meta", encode_meta i.mt_meta (fun m -> i.mt_meta <- m);
 		"doc", null enc_string i.mt_doc;
+		"params", encode_type_params i.mt_types;
 	] @ fields)
+
+and encode_type_params tl =
+	enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) tl)
 
 and encode_tenum e =
 	encode_mtype (TEnumDecl e) [
 		"isExtern", VBool e.e_extern;
 		"exclude", VFunction (Fun0 (fun() -> e.e_extern <- true; VNull));
-		"params", enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) e.e_types);
 		"constructs", encode_pmap encode_efield e.e_constrs;
 		"names", enc_array (List.map enc_string e.e_names);
 	]
 
 and encode_tabstract a =
 	encode_mtype (TAbstractDecl a) [
-		"params", enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) a.a_types);
 	]
 
 and encode_efield f =
@@ -4025,6 +4034,7 @@ and encode_efield f =
 		"index", VInt f.ef_index;
 		"meta", encode_meta f.ef_meta (fun m -> f.ef_meta <- m);
 		"doc", null enc_string f.ef_doc;
+		"params", encode_type_params f.ef_params;
 	]
 
 and encode_cfield f =
@@ -4032,7 +4042,7 @@ and encode_cfield f =
 		"name", enc_string f.cf_name;
 		"type", (match f.cf_kind with Method _ -> encode_lazy_type f.cf_type | _ -> encode_type f.cf_type);
 		"isPublic", VBool f.cf_public;
-		"params", enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) f.cf_params);
+		"params", encode_type_params f.cf_params;
 		"meta", encode_meta f.cf_meta (fun m -> f.cf_meta <- m);
 		"expr", (VFunction (Fun0 (fun() -> ignore(follow f.cf_type); (match f.cf_expr with None -> VNull | Some e -> encode_texpr e))));
 		"kind", encode_field_kind f.cf_kind;
@@ -4086,7 +4096,6 @@ and encode_tclass c =
 		"kind", encode_class_kind c.cl_kind;
 		"isExtern", VBool c.cl_extern;
 		"exclude", VFunction (Fun0 (fun() -> c.cl_extern <- true; c.cl_init <- None; VNull));
-		"params", enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) c.cl_types);
 		"isInterface", VBool c.cl_interface;
 		"superClass", (match c.cl_super with
 			| None -> VNull
@@ -4103,7 +4112,6 @@ and encode_ttype t =
 	encode_mtype (TTypeDecl t) [
 		"isExtern", VBool false;
 		"exclude", VFunction (Fun0 (fun() -> VNull));
-		"params", enc_array (List.map (fun (n,t) -> enc_obj ["name",enc_string n;"t",encode_type t]) t.t_types);
 		"type", encode_type t.t_type;
 	]
 
@@ -4220,7 +4228,20 @@ let decode_type_def v =
 				| None -> raise Invalid_expr
 				| Some t -> n, opt, t
 			in
-			f.cff_name, f.cff_doc, f.cff_meta, (match f.cff_kind with FVar (None,None) -> [] | FFun f -> List.map loop f.f_args | _ -> raise Invalid_expr), f.cff_pos
+			let args, params, t = (match f.cff_kind with
+				| FVar (t,None) -> [], [], t
+				| FFun f -> List.map loop f.f_args, f.f_params, f.f_type
+				| _ -> raise Invalid_expr
+			) in
+			{
+				ec_name = f.cff_name;
+				ec_doc = f.cff_doc;
+				ec_meta = f.cff_meta;
+				ec_pos = f.cff_pos;
+				ec_args = args;
+				ec_params = params;
+				ec_type = t;
+			}
 		in
 		EEnum (mk (if isExtern then [EExtern] else []) (List.map conv fields))
 	| 1, [] ->
@@ -4358,7 +4379,7 @@ let rec make_ast e =
 		EFor (ein,make_ast e)
 	| TIf (e,e1,e2) -> EIf (make_ast e,make_ast e1,eopt e2)
 	| TWhile (e1,e2,flag) -> EWhile (make_ast e1, make_ast e2, flag)
-	| TSwitch (e,cases,def) -> ESwitch (make_ast e,List.map (fun (vl,e) -> List.map make_ast vl, make_ast e) cases,eopt def)
+	| TSwitch (e,cases,def) -> ESwitch (make_ast e,List.map (fun (vl,e) -> List.map make_ast vl, None,make_ast e) cases,eopt def)
 	| TMatch (e,(en,_),cases,def) ->
 		let scases (idx,args,e) =
 			let p = e.epos in
@@ -4378,7 +4399,7 @@ let rec make_ast e =
 				let cfield = (try PMap.find c en.e_constrs with Not_found -> assert false) in
 				let c = (EConst (Ident c),p) in
 				(match follow cfield.ef_type with TFun (eargs,_) -> (ECall (c,mk_args (List.length eargs)),p) | _ -> c)
-			) idx, make_ast e
+			) idx, None, make_ast e
 		in
 		ESwitch (make_ast e,List.map scases cases,eopt def)
 	| TTry (e,catches) -> ETry (make_ast e,List.map (fun (v,e) -> v.v_name, (try make_type v.v_type with Exit -> assert false), make_ast e) catches)

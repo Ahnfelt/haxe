@@ -226,24 +226,16 @@ let check_param_constraints ctx types t pl c p =
 	| _ ->
 		let ctl = (match c.cl_kind with KTypeParameter l -> l | _ -> []) in
 		List.iter (fun ti ->
-			(*
-				what was that used for ?
-				let ti = try snd (List.find (fun (_,t) -> match follow t with TInst(i2,[]) -> i == i2 | _ -> false) types) with Not_found -> TInst (i,tl) in
-			*)
 			let ti = apply_params types pl ti in
+			let ti = (match follow ti with
+				| TInst ({ cl_kind = KGeneric }as c,pl) ->
+					(* if we solve a generic contraint, let's substitute with the actual generic instance before unifying *)
+					let _,_, f = ctx.g.do_build_instance ctx (TClassDecl c) p in
+					f pl
+				| _ -> ti
+			) in
 			unify ctx t ti p
 		) ctl
-
-let get_generic_parameter_kind ctx c =
-	(* first check field parameters, then class parameters *)
-	try
-		ignore (List.assoc (snd c.cl_path) ctx.curfield.cf_params);
-		if has_meta ":generic" ctx.curfield.cf_meta then GPField ctx.curfield else GPNone;
-	with Not_found -> try
-		ignore(List.assoc (snd c.cl_path) ctx.type_params);
-		(match ctx.curclass.cl_kind with | KGeneric -> GPClass ctx.curclass | _ -> GPNone);
-	with Not_found ->
-		GPNone
 
 (* build an instance from a full type *)
 let rec load_instance ctx t p allow_no_params =
@@ -254,8 +246,7 @@ let rec load_instance ctx t p allow_no_params =
 		pt
 	with Not_found ->
 		let mt = load_type_def ctx p t in
-		let cg = match mt with TClassDecl ({cl_kind = KGeneric} as c) -> Some c | _ -> None in
-		let is_generic = cg <> None in
+		let is_generic = match mt with TClassDecl {cl_kind = KGeneric} -> true | _ -> false in
 		let types , path , f = ctx.g.do_build_instance ctx mt p in
 		if allow_no_params && t.tparams = [] then begin
 			let pl = ref [] in
@@ -296,12 +287,6 @@ let rec load_instance ctx t p allow_no_params =
 				| TInst ({ cl_kind = KTypeParameter [] }, []) when not is_generic ->
 					t
 				| TInst (c,[]) ->
-					(* mark a generic class as recursively used if it is used with an "unresolved" non-generic type parameter *)
-					(match get_generic_parameter_kind ctx c,cg with
-					| (GPField _ | GPNone), Some c ->
-						if not (has_meta ":?genericRec" c.cl_meta) then c.cl_meta <- (":?genericRec",[],p) :: c.cl_meta
-					| _ ->
-						());
 					let r = exc_protect ctx (fun r ->
 						r := (fun() -> t);
 						delay ctx PCheckConstraint (fun() -> check_param_constraints ctx types t tparams c p);
@@ -384,6 +369,8 @@ and load_complex_type ctx p t =
 				| AStatic | AOverride | AInline | ADynamic -> error ("Invalid access " ^ Ast.s_access a) p
 			) f.cff_access;
 			let t , access = (match f.cff_kind with
+				| FVar (Some (CTPath({tpackage=[];tname="Void"})), _)  | FProp (_,_,Some (CTPath({tpackage=[];tname="Void"})),_) ->
+					error "Fields of type Void are not allowed in structures" p
 				| FVar (t, e) ->
 					no_expr e;
 					topt t, Var { v_read = AccNormal; v_write = AccNormal }
@@ -404,7 +391,7 @@ and load_complex_type ctx p t =
 						| "set" when not get -> AccCall ("set_" ^ n)
 						| x when get && x = "get_" ^ n -> AccCall x
 						| x when not get && x = "set_" ^ n -> AccCall x
-						| _ ->	
+						| _ ->
 							(if Common.defined ctx.com Define.Haxe3 then error else ctx.com.warning) "Property custom access is no longer supported in Haxe3+" f.cff_pos;
 							AccCall m
 					in
@@ -1114,6 +1101,28 @@ let init_class ctx c p context_init herits fields =
 		let p = cf.cf_pos in
 		if not stat && has_field cf.cf_name c.cl_super then error ("Redefinition of variable " ^ cf.cf_name ^ " in subclass is not allowed") p;
 		let t = cf.cf_type in
+		let rec make_const e =
+			let e = ctx.g.do_optimize ctx e in
+			match e.eexpr with
+			| TConst _ -> Some e
+			| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod) as op,e1,e2) -> (match make_const e1,make_const e2 with
+				| Some e1, Some e2 -> Some (mk (TBinop(op, e1, e2)) e.etype e.epos)
+				| _ -> None)
+			| TParenthesis e -> Some e
+			| TTypeExpr _ -> Some e
+			(* try to inline static function calls *)
+			| TCall ({ etype = TFun(_,ret); eexpr = TField ({ eexpr = TTypeExpr (TClassDecl c) },n) },el) ->
+				(try
+					let cf = PMap.find n c.cl_statics in
+					let func = match cf.cf_expr with Some ({eexpr = TFunction func}) -> func | _ -> raise Not_found in
+					let ethis = mk (TConst TThis) t_dynamic e.epos in
+					let inl = (try Optimizer.type_inline ctx cf func ethis el ret e.epos false with Error (Custom _,_) -> None) in
+					(match inl with
+					| None -> None
+					| Some e -> make_const e)
+				with Not_found -> None)
+			| _ -> None
+		in
 		match e with
 		| None -> ()
 		| Some e ->
@@ -1124,29 +1133,16 @@ let init_class ctx c p context_init herits fields =
 					if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ cf.cf_name);
 					let e = type_var_field ctx t e stat p in
 					let e = (match cf.cf_kind with
+					| Var v when c.cl_extern || has_meta ":extern" cf.cf_meta ->
+						if not stat then begin
+							display_error ctx "Extern non-static variables may not be initialized" p;
+							e
+						end else begin
+							match make_const e with
+							| Some e -> e
+							| None -> display_error ctx "Extern variable initialization must be a constant value" p; e
+						end
 					| Var v when not stat || (v.v_read = AccInline && Common.defined ctx.com Define.Haxe3) ->
-						let rec make_const e =
-							let e = ctx.g.do_optimize ctx e in
-							match e.eexpr with
-							| TConst _ -> Some e
-							| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod) as op,e1,e2) -> (match make_const e1,make_const e2 with
-								| Some e1, Some e2 -> Some (mk (TBinop(op, e1, e2)) e.etype e.epos)
-								| _ -> None)
-							| TParenthesis e -> Some e
-							| TTypeExpr _ -> Some e
-							(* try to inline static function calls *)
-							| TCall ({ etype = TFun(_,ret); eexpr = TField ({ eexpr = TTypeExpr (TClassDecl c) },n) },el) ->
-								(try
-									let cf = PMap.find n c.cl_statics in
-									let func = match cf.cf_expr with Some ({eexpr = TFunction func}) -> func | _ -> raise Not_found in
-									let ethis = mk (TConst TThis) t_dynamic e.epos in
-									let inl = (try Optimizer.type_inline ctx cf func ethis el ret e.epos false with Error (Custom _,_) -> None) in
-									(match inl with
-									| None -> None
-									| Some e -> make_const e)
-								with Not_found -> None)
-							| _ -> None
-						in
 						let e = match make_const e with Some e -> e | None -> display_error ctx "Variable initialization must be a constant value" p; e in
 						e
 					| _ ->
@@ -1313,11 +1309,11 @@ let init_class ctx c p context_init herits fields =
 				if ctx.com.display then () else
 				try
 					let t2, f = (if stat then let f = PMap.find m c.cl_statics in f.cf_type, f else class_field c m) in
-					unify_raise ctx t2 t p;
+					unify_raise ctx t2 t f.cf_pos;
 					(match req_name with None -> () | Some n -> display_error ctx ("Please use " ^ n ^ " to name your property access method") f.cf_pos);
 				with
-					| Error (Unify l,_) -> raise (Error (Stack (Custom ("In method " ^ m ^ " required by property " ^ name),Unify l),p))
-					| Not_found -> 
+					| Error (Unify l,p) -> raise (Error (Stack (Custom ("In method " ^ m ^ " required by property " ^ name),Unify l),p))
+					| Not_found ->
 						if req_name <> None then display_error ctx "Custom property accessor is no longer supported, please use get/set" p else
 						if not (c.cl_interface || c.cl_extern) then display_error ctx ("Method " ^ m ^ " required by property " ^ name ^ " is missing") p
 			in
@@ -1325,7 +1321,7 @@ let init_class ctx c p context_init herits fields =
 				| "null" -> AccNo
 				| "dynamic" -> AccCall ("get_" ^ name)
 				| "never" -> AccNever
-				| "default" -> AccNormal				
+				| "default" -> AccNormal
 				| _ ->
 					let get = if get = "get" then "get_" ^ name else get in
 					delay ctx PForce (fun() -> check_method get (TFun ([],ret)) (if get <> "get" && get <> "get_" ^ name && Common.defined ctx.com Define.Haxe3 then Some ("get_" ^ name) else None));
@@ -1397,7 +1393,8 @@ let init_class ctx c p context_init herits fields =
 				c.cl_constructor <- Some f;
 			end else if not is_static || f.cf_name <> "__init__" then begin
 				if PMap.mem f.cf_name (if is_static then c.cl_statics else c.cl_fields) then error ("Duplicate class field declaration : " ^ f.cf_name) p;
-				if PMap.exists f.cf_name (if is_static then c.cl_fields else c.cl_statics) then error ("Same field name can't be use for both static and instance : " ^ f.cf_name) p;
+				let dup = if is_static then PMap.exists f.cf_name c.cl_fields || has_field f.cf_name c.cl_super else PMap.exists f.cf_name c.cl_statics in
+				if dup then error ("Same field name can't be use for both static and instance : " ^ f.cf_name) p;
 				if is_static then begin
 					c.cl_statics <- PMap.add f.cf_name f c.cl_statics;
 					c.cl_ordered_statics <- f :: c.cl_ordered_statics;
@@ -1692,16 +1689,16 @@ let init_module_type ctx context_init do_init (decl,p) =
 			e.e_meta <- e.e_meta @ hcl.tp_meta);
 		let constructs = ref d.d_data in
 		let get_constructs() =
-			List.map (fun (c,doc,meta,pl,p) ->
+			List.map (fun c ->
 				{
-					cff_name = c;
-					cff_doc = doc;
-					cff_meta = meta;
-					cff_pos = p;
+					cff_name = c.ec_name;
+					cff_doc = c.ec_doc;
+					cff_meta = c.ec_meta;
+					cff_pos = c.ec_pos;
 					cff_access = [];
-					cff_kind = (match pl with
-						| [] -> FVar (None,None)
-						| _ -> FFun { f_params = []; f_type = None; f_expr = None; f_args = List.map (fun (n,o,t) -> n,o,Some t,None) pl });
+					cff_kind = (match c.ec_args, c.ec_params with
+						| [], [] -> FVar (c.ec_type,None)
+						| _ -> FFun { f_params = c.ec_params; f_type = c.ec_type; f_expr = None; f_args = List.map (fun (n,o,t) -> n,o,Some t,None) c.ec_args });
 				}
 			) (!constructs)
 		in
@@ -1709,39 +1706,69 @@ let init_module_type ctx context_init do_init (decl,p) =
 			match e with
 			| EVars [_,Some (CTAnonymous fields),None] ->
 				constructs := List.map (fun f ->
-					(f.cff_name,f.cff_doc,f.cff_meta,(match f.cff_kind with
-					| FVar (None,None) -> []
-					| FFun { f_params = []; f_type = None; f_expr = (None|Some (EBlock [],_)); f_args = pl } -> List.map (fun (n,o,t,_) -> match t with None -> error "Missing function parameter type" f.cff_pos | Some t -> n,o,t) pl
-					| _ -> error "Invalid enum constructor in @:build result" p
-					),f.cff_pos)
+					let args, params, t = (match f.cff_kind with
+					| FVar (t,None) -> [], [], t
+					| FFun { f_params = pl; f_type = t; f_expr = (None|Some (EBlock [],_)); f_args = al } ->
+						let al = List.map (fun (n,o,t,_) -> match t with None -> error "Missing function parameter type" f.cff_pos | Some t -> n,o,t) al in
+						al, pl, t
+					| _ ->
+						error "Invalid enum constructor in @:build result" p
+					) in
+					{
+						ec_name = f.cff_name;
+						ec_doc = f.cff_doc;
+						ec_meta = f.cff_meta;
+						ec_pos = f.cff_pos;
+						ec_args = args;
+						ec_params = params;
+						ec_type = t;
+					}
 				) fields
 			| _ -> error "Enum build macro must return a single variable with anonymous object fields" p
 		);
 		let et = TEnum (e,List.map snd e.e_types) in
 		let names = ref [] in
 		let index = ref 0 in
-		List.iter (fun (c,doc,meta,t,p) ->
-			let t = (match t with
-				| [] -> et
+		List.iter (fun c ->
+			let p = c.ec_pos in
+			let params = ref [] in
+			params := List.map (fun tp -> type_type_params ctx ([],c.ec_name) (fun() -> !params) c.ec_pos tp) c.ec_params;
+			let params = !params in
+			let ctx = { ctx with type_params = params @ ctx.type_params } in
+			let rt = (match c.ec_type with
+				| None -> et
+				| Some t ->
+					let t = load_complex_type ctx p t in
+					(match follow t with
+					| TEnum (te,_) when te == e ->
+						()
+					| _ ->
+						error "Explicit enum type must be of the same enum type" p);
+					t
+			) in
+			let t = (match c.ec_args with
+				| [] -> rt
 				| l ->
 					let pnames = ref PMap.empty in
 					TFun (List.map (fun (s,opt,t) ->
-						if PMap.mem s (!pnames) then error ("Duplicate parameter '" ^ s ^ "' in enum constructor " ^ c) p;
+						(match t with CTPath({tpackage=[];tname="Void"}) -> error "Arguments of type Void are not allowed in enum constructors" c.ec_pos | _ -> ());
+						if PMap.mem s (!pnames) then error ("Duplicate parameter '" ^ s ^ "' in enum constructor " ^ c.ec_name) p;
 						pnames := PMap.add s () (!pnames);
 						s, opt, load_type_opt ~opt ctx p (Some t)
-					) l, et)
+					) l, rt)
 			) in
-			if PMap.mem c e.e_constrs then error ("Duplicate constructor " ^ c) p;
-			e.e_constrs <- PMap.add c {
-				ef_name = c;
+			if PMap.mem c.ec_name e.e_constrs then error ("Duplicate constructor " ^ c.ec_name) p;
+			e.e_constrs <- PMap.add c.ec_name {
+				ef_name = c.ec_name;
 				ef_type = t;
 				ef_pos = p;
-				ef_doc = doc;
+				ef_doc = c.ec_doc;
 				ef_index = !index;
-				ef_meta = meta;
+				ef_params = params;
+				ef_meta = c.ec_meta;
 			} e.e_constrs;
 			incr index;
-			names := c :: !names;
+			names := c.ec_name :: !names;
 		) (!constructs);
 		e.e_names <- List.rev !names;
 		e.e_extern <- e.e_extern || e.e_names = [];
@@ -1835,7 +1862,7 @@ let resolve_module_file com m remap p =
 		| x :: l , name ->
 			let x = (try
 				match PMap.find x com.package_rules with
-				| Forbidden -> raise (Forbid_package ((x,m,p),[],platform_name com.platform));
+				| Forbidden -> raise (Forbid_package ((x,m,p),[],if Common.defined com Define.Macro then "macro" else platform_name com.platform));
 				| Directory d -> d
 				| Remap d -> remap := d :: l; d
 				with Not_found -> x
@@ -1916,7 +1943,7 @@ let load_module ctx m p =
 			try
 				type_module ctx m file decls p
 			with Forbid_package (inf,pl,pf) when p <> Ast.null_pos ->
-				raise (Forbid_package (inf,p::pl,if ctx.in_macro then "macro" else pf))
+				raise (Forbid_package (inf,p::pl,pf))
 	) in
 	add_dependency ctx.m.curmod m2;
 	if ctx.pass = PTypeField then flush_pass ctx PBuildClass "load_module";

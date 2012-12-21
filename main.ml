@@ -260,10 +260,14 @@ let add_libs com libs =
 	let call_haxelib() =
 		let t = Common.timer "haxelib" in
 		let cmd = "haxelib path " ^ String.concat " " libs in
-		let p = Unix.open_process_in cmd in
-		let lines = Std.input_list p in
-		let ret = Unix.close_process_in p in
-		if ret <> Unix.WEXITED 0 then failwith (String.concat "\n" lines);
+		let pin, pout, perr = Unix.open_process_full cmd (Unix.environment()) in
+		let lines = Std.input_list pin in
+		let err = Std.input_list perr in
+		let ret = Unix.close_process_full (pin,pout,perr) in
+		if ret <> Unix.WEXITED 0 then failwith (match lines, err with
+			| [], [] -> "Failed to call haxelib (command not found ?)"
+			| [], [s] when ExtString.String.ends_with (ExtString.String.strip s) "Module not found : path" -> "The haxelib command has been strip'ed, please install it again"
+			| _ -> String.concat "\n" (lines@err));
 		t();
 		lines
 	in
@@ -306,9 +310,10 @@ let run_command ctx cmd =
 	let t = Common.timer "command" in
 	let cmd = expand_env ~h:(Some h) cmd in
 	let len = String.length cmd in
-	if len > 3 && String.sub cmd 0 3 = "cd " then
-		Sys.chdir (String.sub cmd 3 (len - 3))
-	else
+	if len > 3 && String.sub cmd 0 3 = "cd " then begin
+		Sys.chdir (String.sub cmd 3 (len - 3));
+		0
+	end else
 	let binary_string s =
 		if Sys.os_type <> "Win32" && Sys.os_type <> "Cygwin" then s else String.concat "\n" (Str.split (Str.regexp "\r\n") s)
 	in
@@ -345,7 +350,10 @@ let run_command ctx cmd =
 			end
 		| s :: _ ->
 			let n = Unix.read s tmp 0 (String.length tmp) in
-			Buffer.add_substring (if s == iout then bout else berr) tmp 0 n;
+			if s == iout && n > 0 then
+				ctx.com.print (String.sub tmp 0 n)
+			else
+				Buffer.add_substring (if s == iout then bout else berr) tmp 0 n;
 			loop (if n = 0 then List.filter ((!=) s) ins else ins)
 	in
 	(try loop [iout;ierr] with Unix.Unix_error _ -> ());
@@ -353,10 +361,12 @@ let run_command ctx cmd =
 	let sout = binary_string (Buffer.contents bout) in
 	if serr <> "" then ctx.messages <- (if serr.[String.length serr - 1] = '\n' then String.sub serr 0 (String.length serr - 1) else serr) :: ctx.messages;
 	if sout <> "" then ctx.com.print sout;
-	(match (try Unix.close_process_full (pout,pin,perr) with Unix.Unix_error (Unix.ECHILD,_,_) -> (match !result with None -> assert false | Some r -> r)) with
-	| Unix.WEXITED e -> if e <> 0 then failwith ("Command failed with error " ^ string_of_int e)
-	| Unix.WSIGNALED s | Unix.WSTOPPED s -> failwith ("Command stopped with signal " ^ string_of_int s));
-	t()
+	let r = (match (try Unix.close_process_full (pout,pin,perr) with Unix.Unix_error (Unix.ECHILD,_,_) -> (match !result with None -> assert false | Some r -> r)) with
+		| Unix.WEXITED e -> e
+		| Unix.WSIGNALED s | Unix.WSTOPPED s -> if s = 0 then -1 else s
+	) in
+	t();
+	r
 
 let default_flush ctx =
 	List.iter prerr_endline (List.rev ctx.messages);
@@ -547,16 +557,25 @@ and wait_loop boot_com host port =
 		Unix.set_nonblock sin;
 		if verbose then print_endline "Client connected";
 		let b = Buffer.create 0 in
-		let rec read_loop() =
-			try
-				let r = Unix.recv sin tmp 0 bufsize [] in
-				if verbose then Printf.printf "Reading %d bytes\n" r;
-				Buffer.add_substring b tmp 0 r;
-				if r > 0 && tmp.[r-1] = '\000' then Buffer.sub b 0 (Buffer.length b - 1) else read_loop();
+		let rec read_loop count =
+			let r = try
+				Unix.recv sin tmp 0 bufsize []
 			with Unix.Unix_error((Unix.EWOULDBLOCK|Unix.EAGAIN),_,_) ->
-				if verbose then print_endline "Waiting for data...";
-				ignore(Unix.select [] [] [] 0.1);
-				read_loop()
+				0
+			in
+			if verbose then begin
+				if r > 0 then Printf.printf "Reading %d bytes\n" r else print_endline "Waiting for data...";
+			end;
+			Buffer.add_substring b tmp 0 r;
+			if r > 0 && tmp.[r-1] = '\000' then
+				Buffer.sub b 0 (Buffer.length b - 1)
+			else begin
+				if r = 0 then ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
+				if count = 100 then
+					failwith "Aborting unactive connection"
+				else
+					read_loop (count + 1);
+			end;
 		in
 		let rec cache_context com =
 			if not com.display then begin
@@ -590,7 +609,7 @@ and wait_loop boot_com host port =
 			ctx
 		in
 		(try
-			let data = parse_hxml_data (read_loop()) in
+			let data = parse_hxml_data (read_loop 0) in
 			Unix.clear_nonblock sin;
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
@@ -620,7 +639,12 @@ and wait_loop boot_com host port =
 				print_endline (Printf.sprintf "Time spent : %.3fs" (get_time() -. t0));
 			end
 		with Unix.Unix_error _ ->
-			if verbose then print_endline "Connection Aborted");
+			if verbose then print_endline "Connection Aborted"
+		| e ->
+			let estr = Printexc.to_string e in
+			if verbose then print_endline ("Uncaught Error : " ^ estr);
+			(try ssend sin estr with _ -> ());
+		);
 		Unix.close sin;
 		(* prevent too much fragmentation by doing some compactions every X run *)
 		incr run_count;
@@ -640,32 +664,43 @@ and do_connect host port args =
 	(try Unix.connect sock (Unix.ADDR_INET (Unix.inet_addr_of_string host,port)) with _ -> failwith ("Couldn't connect on " ^ host ^ ":" ^ string_of_int port));
 	let args = ("--cwd " ^ Unix.getcwd()) :: args in
 	ssend sock (String.concat "" (List.map (fun a -> a ^ "\n") args) ^ "\000");
-	let buf = Buffer.create 0 in
-	let tmp = String.create 100 in
-	let rec loop() =
-		let b = Unix.recv sock tmp 0 100 [] in
-		Buffer.add_substring buf tmp 0 b;
-		if b > 0 then loop()
-	in
-	loop();
 	let has_error = ref false in
 	let rec print line =
 		match (if line = "" then '\x00' else line.[0]) with
 		| '\x01' ->
-			print_string (String.concat "\n" (List.tl (ExtString.String.nsplit line "\x01")))
+			print_string (String.concat "\n" (List.tl (ExtString.String.nsplit line "\x01")));
+			flush stdout
 		| '\x02' ->
 			has_error := true;
 		| _ ->
 			prerr_endline line;
 	in
-	let lines = ExtString.String.nsplit (Buffer.contents buf) "\n" in
-	let lines = (match List.rev lines with "" :: l -> List.rev l | _ -> lines) in
-	List.iter print lines;
+	let buf = Buffer.create 0 in
+	let process() =
+		let lines = ExtString.String.nsplit (Buffer.contents buf) "\n" in
+		(* the last line ends with \n *)
+		let lines = (match List.rev lines with "" :: l -> List.rev l | _ -> lines) in
+		List.iter print lines;
+	in
+	let tmp = String.create 1024 in
+	let rec loop() =
+		let b = Unix.recv sock tmp 0 1024 [] in
+		Buffer.add_substring buf tmp 0 b;
+		if b > 0 then begin
+			if String.get tmp (b - 1) = '\n' then begin
+				process();
+				Buffer.reset buf;
+			end;
+			loop();
+		end
+	in
+	loop();
+	process();
 	if !has_error then exit 1
 
 and init ctx =
 	let usage = Printf.sprintf
-		"Haxe Compiler %d.%.2d - (c)2005-2012 Haxe Foundation\n Usage : haxe%s -main <class> [-swf|-js|-neko|-php|-cpp|-cs|-java|-as3] <output> [options]\n Options :"
+		"Haxe Compiler %d.%.2d - (c)2005-2012 Haxe Foundation\n Usage : haxe%s -main <class> [-swf|-js|-neko|-php|-cpp|-as3] <output> [options]\n Options :"
 		(version / 100) (version mod 100) (if Sys.os_type = "Win32" then ".exe" else "")
 	in
 	let com = ctx.com in
@@ -694,6 +729,7 @@ try
 	Common.define_value com Define.Dce "std";
 	com.warning <- (fun msg p -> message ctx ("Warning : " ^ msg) p);
 	com.error <- error ctx;
+	if !global_cache <> None then com.run_command <- run_command ctx;
 	Parser.display_error := (fun e p -> com.error (Parser.error_msg e) p);
 	Parser.use_doc := !Common.display_default || (!global_cache <> None);
 	(try
@@ -747,7 +783,7 @@ try
 		("-cpp",Arg.String (fun dir ->
 			set_platform Cpp dir;
 		),"<directory> : generate C++ code into target directory");
-		("-cs",Arg.String (fun dir ->
+ 		("-cs",Arg.String (fun dir ->
 			set_platform Cs dir;
 		),"<directory> : generate C# code into target directory");
 		("-java",Arg.String (fun dir ->
@@ -791,14 +827,18 @@ try
 				| [width; height; fps] ->
 					(int_of_string width,int_of_string height,float_of_string fps,0xFFFFFF)
 				| [width; height; fps; color] ->
-					(int_of_string width, int_of_string height, float_of_string fps, int_of_string ("0x" ^ color))
+					let color = if ExtString.String.starts_with color "0x" then color else "0x" ^ color in
+					(int_of_string width, int_of_string height, float_of_string fps, int_of_string color)
 				| _ -> raise Exit)
 			with
-				_ -> raise (Arg.Bad "Invalid SWF header format")
+				_ -> raise (Arg.Bad "Invalid SWF header format, expected width:height:fps[:color]")
 		),"<header> : define SWF header (width:height:fps:color)");
 		("-swf-lib",Arg.String (fun file ->
-			Genswf.add_swf_lib com file
+			Genswf.add_swf_lib com file false
 		),"<file> : add the SWF library to the compiled SWF");
+		("-swf-lib-extern",Arg.String (fun file ->
+			Genswf.add_swf_lib com file true
+		),"<file> : use the SWF library for type checking");
 		("-java-lib",Arg.String (fun file ->
 			Genjava.add_java_lib com file
 		),"<file> : add an external JAR or class directory library");
@@ -816,7 +856,7 @@ try
 			let file, name = (match ExtString.String.nsplit res "@" with
 				| [file; name] -> file, name
 				| [file] -> file, file
-				| _ -> raise (Arg.Bad "Invalid Resource format : should be file@name")
+				| _ -> raise (Arg.Bad "Invalid Resource format, expected file@name")
 			) in
 			let file = (try Common.find_file com file with Not_found -> file) in
 			let data = (try
@@ -890,7 +930,7 @@ try
 			Common.define com Define.PhpPrefix;
 		),"<name> : prefix all classes with given name");
 		("--remap", Arg.String (fun s ->
-			let pack, target = (try ExtString.String.split s ":" with _ -> raise (Arg.Bad "Invalid format")) in
+			let pack, target = (try ExtString.String.split s ":" with _ -> raise (Arg.Bad "Invalid remap format, expected source:target")) in
 			com.package_rules <- PMap.add pack (Remap target) com.package_rules;
 		),"<package:target> : remap a package to another one");
 		("--interp", Arg.Unit (fun() ->
@@ -906,7 +946,7 @@ try
 		("--dce", Arg.String (fun mode ->
 			(match mode with
 			| "std" | "full" | "no" -> ()
-			| _ -> raise (Arg.Bad "Invalid DCE mode"));
+			| _ -> raise (Arg.Bad "Invalid DCE mode, expected std | full | no"));
 			Common.define_value com Define.Dce mode
 		),"[std|full|no] : set the dead code elimination mode");
 		("--wait", Arg.String (fun hp ->
@@ -959,6 +999,13 @@ try
 		com.main_class <- None;
 		let real = Extc.get_real_path (!Parser.resume_display).Ast.pfile in
 		classes := lookup_classes com real;
+		if !classes = [] then begin
+			if not (Sys.file_exists real) then failwith "Display file does not exists";
+			(match List.rev (ExtString.String.nsplit real "\\") with
+			| file :: _ when file.[0] >= 'a' && file.[1] <= 'z' -> failwith ("Display file '" ^ file ^ "' should not start with a lowercase letter")
+			| _ -> ());
+			failwith "Display file was not found in class path";
+		end;
 		Common.log com ("Display file : " ^ real);
 		Common.log com ("Classes found : ["  ^ (String.concat "," (List.map Ast.s_type_path !classes)) ^ "]");
 	end;
@@ -1064,6 +1111,7 @@ try
 			Codegen.add_field_inits;
 			Codegen.add_meta_field;
 			Codegen.check_remove_metadata;
+			Codegen.check_void_field;
 		] in
 		List.iter (fun t -> List.iter (fun f -> f tctx t) type_filters) com.types;
 		if ctx.has_error then raise Abort;
@@ -1108,15 +1156,18 @@ try
 			Common.log com ("Generating Cpp in : " ^ com.file);
 			Gencpp.generate com;
 		| Cs ->
-			if com.verbose then print_endline ("Generating C# in : " ^ com.file);
+      Common.log com ("Generating Cs in : " ^ com.file);
 			Gencs.generate com;
 		| Java ->
-			if com.verbose then print_endline ("Generating Java in : " ^ com.file);
+      Common.log com ("Generating Cs in : " ^ com.file);
 			Genjava.generate com;
 		);
 	end;
 	Sys.catch_break false;
-	if not !no_output then List.iter (run_command ctx) (List.rev !cmds)
+	if not !no_output then List.iter (fun c ->
+		let r = run_command ctx c in
+		if r <> 0 then failwith ("Command failed with error " ^ string_of_int r)
+	) (List.rev !cmds)
 with
 	| Abort | Typecore.Fatal_error ->
 		()

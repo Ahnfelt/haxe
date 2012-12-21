@@ -72,6 +72,16 @@
 	public function matchedPos() : { pos : Int, len : Int } {
 		return untyped { pos : __php__("$this->matches[0][1]"), len : __call__("strlen",__php__("$this->matches[0][0]")) };
 	}
+	
+	public function matchSub( s : String, pos : Int, len : Int = -1):Bool {
+		var p : Int = untyped __call__("preg_match", re, len < 0 ? s : s.substr(0,pos + len), matches, __php__("PREG_OFFSET_CAPTURE"), pos);
+		if(p > 0) {
+			last = s;
+		}
+		else
+			last = null;
+		return p > 0;
+	}	
 
 	public function split( s : String ) : Array<String> {
 		return untyped __php__("new _hx_array(preg_split($this->re, $s, $this->hglobal ? -1 : 2))");
@@ -84,16 +94,38 @@
 		return untyped __call__("preg_replace", re, by, s, global ? -1 : 1);
 	}
 
-	public function customReplace( s : String, f : EReg -> String ) : String {
-		var buf = "";
-		while( true ) {
-			if( !match(s) )
+	public function map( s : String, f : EReg -> String ) : String {
+		var offset = 0;
+		var buf = new StringBuf();
+		do {
+			if (offset >= s.length)
 				break;
-			buf += matchedLeft();
-			buf += f(this);
-			s = matchedRight();
-		}
-		buf += s;
-		return buf;
+			else if (!matchSub(s, offset)) {
+				buf.add(s.substr(offset));
+				break;
+			}
+			var p = matchedPos();
+			buf.add(s.substr(offset, p.pos - offset));
+			buf.add(f(this));
+			if (p.len == 0) {
+				buf.add(s.substr(p.pos, 1));
+				offset = p.pos + 1;
+			}
+			else
+				offset = p.pos + p.len;
+		} while (global);
+		if (!global && offset < s.length)
+			buf.add(s.substr(offset));		
+		return buf.toString();
 	}
+	
+	#if !haxe3
+	public inline function customReplace( s : String, f : EReg -> String ) : String {
+		var old = global;
+		global = true;
+		var ret = map(s, f);
+		global = old;
+		return ret;
+	}
+	#end
 }

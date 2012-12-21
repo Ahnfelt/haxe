@@ -185,13 +185,15 @@ let rec can_access ctx c cf stat =
 		| None -> false)
 		|| has ":access" ctx.curclass ctx.curfield (make_path c cf)
 	in
-	loop c
+	let b = loop c
 	(* access is also allowed of we access a type parameter which is constrained to our (base) class *)
 	|| (match c.cl_kind with
 		| KTypeParameter tl ->
 			List.exists (fun t -> match follow t with TInst(c,_) -> loop c | _ -> false) tl
 		| _ -> false)
-	|| (has_meta ":privateAccess" ctx.meta)
+	|| (has_meta ":privateAccess" ctx.meta) in
+	if b && Common.defined ctx.com Common.Define.As3 && not (has_meta ":public" cf.cf_meta) then cf.cf_meta <- (":public",[],cf.cf_pos) :: cf.cf_meta;
+	b
 
 (* removes the first argument of the class field's function type and all its overloads *)
 let prepare_using_field cf = match cf.cf_type with
@@ -208,6 +210,45 @@ let prepare_using_field cf = match cf.cf_type with
 		in
 		{cf with cf_overloads = loop [] cf.cf_overloads; cf_type = TFun(args,ret)}
 	| _ -> cf
+
+
+let parse_string ctx s p inlined =
+	let old = Lexer.save() in
+	let old_file = (try Some (Hashtbl.find Lexer.all_files p.pfile) with Not_found -> None) in
+	let old_display = !Parser.resume_display in
+	let old_de = !Parser.display_error in
+	let restore() =
+		(match old_file with
+		| None -> ()
+		| Some f -> Hashtbl.replace Lexer.all_files p.pfile f);
+		if not inlined then Parser.resume_display := old_display;
+		Lexer.restore old;
+		Parser.display_error := old_de
+	in
+	Lexer.init p.pfile;
+	Parser.display_error := (fun e p -> raise (Parser.Error (e,p)));
+	if not inlined then Parser.resume_display := null_pos;
+	let _, decls = try
+		Parser.parse ctx.com (Lexing.from_string s)
+	with Parser.Error (e,pe) ->
+		restore();
+		error (Parser.error_msg e) (if inlined then pe else p)
+	| Lexer.Error (e,pe) ->
+		restore();
+		error (Lexer.error_msg e) (if inlined then pe else p)
+	in
+	restore();
+	match decls with
+	| [(d,_)] -> d
+	| _ -> assert false
+
+let parse_expr_string ctx s p inl =
+	let head = "class X{static function main() " in
+	let head = (if p.pmin > String.length head then head ^ String.make (p.pmin - String.length head) ' ' else head) in
+	let rec loop e = let e = Ast.map_expr loop e in (fst e,p) in
+	match parse_string ctx (head ^ s ^ "}") p inl with
+	| EClass { d_data = [{ cff_name = "main"; cff_kind = FFun { f_expr = Some e } }]} -> if inl then e else loop e
+	| _ -> assert false
 
 (* ---------------------------------------------------------------------- *)
 (* PASS 3 : type expression & check structure *)
@@ -798,7 +839,7 @@ let rec type_ident_raise ?(imported_enums=true) ctx i p mode =
 				| TEnumDecl e ->
 					try
 						let ef = PMap.find i e.e_constrs in
-						mk (TEnumField (e,i)) (monomorphs e.e_types ef.ef_type) p
+						mk (TEnumField (e,i)) (monomorphs ef.ef_params (monomorphs e.e_types ef.ef_type)) p
 					with
 						Not_found -> loop l
 		in
@@ -1241,7 +1282,9 @@ let rec type_binop ctx op e1 e2 p =
 	| OpEq
 	| OpNotEq ->
 		(try
-			unify_raise ctx e1.etype e2.etype p
+			unify_raise ctx e1.etype e2.etype p;
+			(* we only have to check one type here, because unification fails if one is Void and the other is not *)
+			(match follow e2.etype with TAbstract({a_path=[],"Void"},_) -> error "Cannot compare Void" p | _ -> ())
 		with
 			Error (Unify _,_) -> unify ctx e2.etype e1.etype p);
 		mk_op ctx.t.tbool
@@ -1283,7 +1326,7 @@ let rec type_binop ctx op e1 e2 p =
 		unify ctx e2.etype b p;
 		mk_op b
 	| OpInterval ->
-		let t = Typeload.load_core_type ctx "IntIter" in
+		let t = Typeload.load_core_type ctx "IntIterator" in
 		unify ctx e1.etype tint e1.epos;
 		unify ctx e2.etype tint e2.epos;
 		mk (TNew ((match t with TInst (c,[]) -> c | _ -> assert false),[],[e1;e2])) t p
@@ -1350,7 +1393,7 @@ and type_unop ctx op flag e p =
 				ev2
 			]) t p
 
-and type_switch ctx e cases def need_val with_type p =
+and type_switch_old ctx e cases def need_val with_type p =
 	let eval = type_expr ctx e in
 	let old_m = ctx.m in
 	let enum = ref None in
@@ -1394,19 +1437,21 @@ and type_switch ctx e cases def need_val with_type p =
 		if Hashtbl.mem used_cases s then error "This constructor has already been used" p;
 		Hashtbl.add used_cases s ();
 		let cst = (try PMap.find s en.e_constrs with Not_found -> assert false) in
-		let pl = (match cst.ef_type with
-		| TFun (l,_) ->
+		let et = apply_params en.e_types params (monomorphs cst.ef_params cst.ef_type) in
+		let pl, rt = (match et with
+		| TFun (l,rt) ->
 			let pl = (if List.length l = List.length pl then pl else
 				match pl with
 				| [None] -> List.map (fun _ -> None) l
 				| _ -> error ("This constructor requires " ^ string_of_int (List.length l) ^ " arguments") p
 			) in
-			Some (List.map2 (fun p (_,_,t) -> match p with None -> None | Some p -> Some (p, apply_params en.e_types params t)) pl l)
+			Some (List.map2 (fun p (_,_,t) -> match p with None -> None | Some p -> Some (p, t)) pl l), rt
 		| TEnum _ ->
 			if pl <> [] then error "This constructor does not require any argument" p;
-			None
+			None, et
 		| _ -> assert false
 		) in
+		unify ctx rt eval.etype p;
 		CMatch (cst,pl,p)
 	in
 	let type_case efull e pl p =
@@ -1517,8 +1562,10 @@ and type_switch ctx e cases def need_val with_type p =
 		(match def with
 		| Some _ -> ()
 		| None ->
+			let tenum = TEnum(enum,enparams) in
 			let l = PMap.fold (fun c acc ->
-				if Hashtbl.mem used_cases c.ef_name then acc else c.ef_name :: acc
+				let t = monomorphs enum.e_types (monomorphs c.ef_params (match c.ef_type with TFun (_,t) -> t | t -> t)) in
+				if Hashtbl.mem used_cases c.ef_name || not (try unify_raise ctx t tenum c.ef_pos; true with Error (Unify _,_) -> false) then acc else c.ef_name :: acc
 			) enum.e_constrs [] in
 			match l with
 			| [] -> ()
@@ -1547,6 +1594,13 @@ and type_switch ctx e cases def need_val with_type p =
 		let def = def() in
 		let t = if not need_val then (mk_mono()) else unify_min ctx (List.rev !el) in
 		mk (TSwitch (eval,cases,def)) t p
+
+and type_switch ctx e cases def need_val with_type p =
+	try
+		if (Common.defined ctx.com Common.Define.NoPatternMatching) then raise Exit;
+		match_expr ctx e cases def need_val with_type p
+	with Exit ->
+		type_switch_old ctx e (List.map (fun (cl,_,e) -> cl,e) cases) def need_val with_type p
 
 and type_ident ctx i p mode =
 	try
@@ -1603,7 +1657,8 @@ and type_expr_with_type_raise ?(print_error=true) ctx e t =
 				raise Exit
 			with Not_found -> try
 				let ef = PMap.find s e.e_constrs in
-				let constr = mk (TEnumField (e,s)) (apply_params e.e_types pl ef.ef_type) p in
+				let et = apply_params e.e_types pl (monomorphs ef.ef_params ef.ef_type) in
+				let constr = mk (TEnumField (e,s)) et p in
 				build_call ctx (AKExpr constr) el (Some t) p
 			with Not_found ->
 				if ctx.untyped then raise Exit; (* __js__, etc. *)
@@ -1914,6 +1969,94 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		let opt = mk (TConst (TString opt)) ctx.t.tstring p in
 		let t = Typeload.load_core_type ctx "EReg" in
 		mk (TNew ((match t with TInst (c,[]) -> c | _ -> assert false),[],[str;opt])) t p
+	| EConst (String s) when Lexer.is_fmt_string p ->
+		let e = ref None in
+		let pmin = ref p.pmin in
+		let min = ref (p.pmin + 1) in
+		let add enext len =
+			let p = { p with pmin = !min; pmax = !min + len } in
+			min := !min + len;
+			match !e with
+			| None -> e := Some (enext,p)
+			| Some prev ->
+				e := Some (EBinop (OpAdd,prev,(enext,p)),punion (pos prev) p)
+		in
+		let add_sub start pos =
+			let len = pos - start in
+			if len > 0 || !e = None then add (EConst (String (String.sub s start len))) len
+		in
+		let warn_escape = Common.defined ctx.com Define.FormatWarning in
+		let warn pos len =
+			ctx.com.warning "This string is formated" { p with pmin = !pmin + 1 + pos; pmax = !pmin + 1 + pos + len }
+		in
+		let len = String.length s in
+		let rec parse start pos =
+			if pos = len then add_sub start pos else
+			let c = String.unsafe_get s pos in
+			let pos = pos + 1 in
+			if c = '\'' then begin
+				incr pmin;
+				incr min;
+			end;
+			if c <> '$' || pos = len then parse start pos else
+			match String.unsafe_get s pos with
+			| '$' ->
+				if warn_escape then warn pos 1;
+				(* double $ *)
+				add_sub start pos;
+				parse (pos + 1) (pos + 1)
+			| '{' ->
+				parse_group start pos '{' '}' "brace"
+			| '(' ->
+				parse_group start pos '(' ')' "parenthesis"
+			| 'a'..'z' | 'A'..'Z' | '_' ->
+				add_sub start (pos - 1);
+				incr min;
+				let rec loop i =
+					if i = len then i else
+					let c = String.unsafe_get s i in
+					match c with
+					| 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> loop (i+1)
+					| _ -> i
+				in
+				let iend = loop (pos + 1) in
+				let len = iend - pos in
+				if warn_escape then warn pos len;
+				add (EConst (Ident (String.sub s pos len))) len;
+				parse (pos + len) (pos + len)
+			| _ ->
+				(* keep as-it *)
+				parse start pos
+		and parse_group start pos gopen gclose gname =
+			add_sub start (pos - 1);
+			let rec loop groups i =
+				if i = len then
+					match groups with
+					| [] -> assert false
+					| g :: _ -> error ("Unclosed " ^ gname) { p with pmin = !pmin + g + 1; pmax = !pmin + g + 2 }
+				else
+					let c = String.unsafe_get s i in
+					if c = gopen then
+						loop (i :: groups) (i + 1)
+					else if c = gclose then begin
+						let groups = List.tl groups in
+						if groups = [] then i else loop groups (i + 1)
+					end else
+						loop groups (i + 1)
+			in
+			let send = loop [pos] (pos + 1) in
+			let slen = send - pos - 1 in
+			let scode = String.sub s (pos + 1) slen in
+			if warn_escape then warn (pos + 1) slen;
+			min := !min + 2;
+			add (fst (parse_expr_string ctx scode { p with pmin = !pmin + pos + 2; pmax = !pmin + send + 1 } true)) slen;
+			min := !min + 1;
+			parse (send + 1) (send + 1)
+		in
+		parse 0 0;
+		(match !e with
+		| None -> assert false
+		| Some e -> type_expr ctx ~need_val e);
 	| EConst c ->
 		Codegen.type_constant ctx.com c p
     | EBinop (op,e1,e2) ->
@@ -1955,6 +2098,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 			let f,add = object_field f in
 			if PMap.mem f acc then error ("Duplicate field in object declaration : " ^ f) p;
 			let e = type_expr ctx e in
+			(match follow e.etype with TAbstract({a_path=[],"Void"},_) -> error "Fields of type Void are not allowed in structures" e.epos | _ -> ());
 			let cf = mk_field f e.etype e.epos in
 			((f,e) :: l, if add then PMap.add f cf acc else acc)
 		in
@@ -2118,26 +2262,17 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		let t = Typeload.load_instance ctx t p true in
 		let el, c , params = (match follow t with
 		| TInst ({cl_kind = KTypeParameter tl} as c,params) ->
-			(match Typeload.get_generic_parameter_kind ctx c with
-			| GPClass c ->
-				if not (has_meta ":?genericT" c.cl_meta) then c.cl_meta <- (":?genericT",[],p) :: c.cl_meta;
-			| GPField cf ->
-				()
-			| GPNone ->
-				error "Only generic type parameters can be constructed" p);
+			if not (Codegen.is_generic_parameter ctx c) then error "Only generic type parameters can be constructed" p;
 			let el = List.map (type_expr ctx) el in
-			let ctor = mk_field "new" (tfun (List.map (fun e -> e.etype) el) ctx.t.tvoid) p in
-  			(match c.cl_constructor with
- 				| Some ctor2 ->
- 					unify ctx ctor.cf_type ctor2.cf_type p
- 				| None ->
-					ctor.cf_kind <- Method MethNormal;
- 					c.cl_constructor <- Some ctor;
-					List.iter (fun t -> match follow t with
-						| TAnon a -> (try unify ctx (PMap.find "new" a.a_fields).cf_type ctor.cf_type p; with Not_found -> ())
-						| _ -> ()
-					) tl;
-					c.cl_kind <- KTypeParameter ((mk_anon (PMap.add "new" ctor PMap.empty)) :: tl));
+			let ct = (tfun (List.map (fun e -> e.etype) el) ctx.t.tvoid) in
+			List.iter (fun t -> match follow t with
+				| TAnon a ->
+					(try
+						unify ctx (PMap.find "new" a.a_fields).cf_type ct p;
+					with Not_found ->
+						())
+				| _ -> ()
+			) tl;
 			el,c,params
 		| TInst (c,params) ->
 			let name = (match c.cl_path with [], name -> name | x :: _ , _ -> x) in
@@ -2717,36 +2852,6 @@ let get_type_patch ctx t sub =
 			Hashtbl.add h k tp;
 			tp
 
-let parse_string ctx s p inlined =
-	let old = Lexer.save() in
-	let old_file = (try Some (Hashtbl.find Lexer.all_files p.pfile) with Not_found -> None) in
-	let old_display = !Parser.resume_display in
-	let old_de = !Parser.display_error in
-	let restore() =
-		(match old_file with
-		| None -> ()
-		| Some f -> Hashtbl.replace Lexer.all_files p.pfile f);
-		if not inlined then Parser.resume_display := old_display;
-		Lexer.restore old;
-		Parser.display_error := old_de
-	in
-	Lexer.init p.pfile;
-	Parser.display_error := (fun e p -> raise (Parser.Error (e,p)));
-	if not inlined then Parser.resume_display := null_pos;
-	let _, decls = try
-		Parser.parse ctx.com (Lexing.from_string s)
-	with Parser.Error (e,pe) ->
-		restore();
-		error (Parser.error_msg e) (if inlined then pe else p)
-	| Lexer.Error (e,pe) ->
-		restore();
-		error (Lexer.error_msg e) (if inlined then pe else p)
-	in
-	restore();
-	match decls with
-	| [(d,_)] -> d
-	| _ -> assert false
-
 let macro_timer ctx path =
 	Common.timer (if Common.defined ctx.com Define.MacroTimes then "macro " ^ path else "macro execution")
 
@@ -2778,14 +2883,7 @@ let make_macro_api ctx p =
 		| TAbstractDecl a -> TAbstract (a,List.map snd a.a_types)
 	in
 	let parse_expr_string s p inl =
-		typing_timer ctx (fun() ->
-			let head = "class X{static function main() " in
-			let head = (if p.pmin > String.length head then head ^ String.make (p.pmin - String.length head) ' ' else head) in
-			let rec loop e = let e = Ast.map_expr loop e in (fst e,p) in
-			match parse_string ctx (head ^ s ^ "}") p inl with
-			| EClass { d_data = [{ cff_name = "main"; cff_kind = FFun { f_expr = Some e } }]} -> if inl then e else loop e
-			| _ -> assert false
-		)
+		typing_timer ctx (fun() -> parse_expr_string ctx s p inl)
 	in
 	{
 		Interp.pos = p;
@@ -3114,6 +3212,7 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 		| _ ->
 			el,[]
 	in
+	let todo = ref [] in
 	let args =
 		(*
 			force default parameter types to haxe.macro.Expr, and if success allow to pass any value type since it will be encoded
@@ -3127,7 +3226,11 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 		let constants = List.map (fun e ->
 			let p = snd e in
 			let e = (try
-				ignore(Codegen.type_constant_value ctx.com e);
+				(match Codegen.type_constant_value ctx.com e with
+				| { eexpr = TConst (TString _); epos = p } when Lexer.is_fmt_string p ->
+					Lexer.remove_fmt_string p;
+					todo := (fun() -> Lexer.add_fmt_string p) :: !todo;
+				| _ -> ());
 				e
 			with Error (Custom _,_) ->
 				(* if it's not a constant, let's make something that is typed as haxe.macro.Expr - for nice error reporting *)
@@ -3141,6 +3244,7 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 			(EArray ((EArrayDecl [e],p),(EConst (Int (string_of_int (!index))),p)),p)
 		) el in
 		let elt, _ = unify_call_params ctx2 (Some (TInst(mclass,[]),mfield)) constants (List.map fst eargs) t_dynamic p false in
+		List.iter (fun f -> f()) (!todo);
 		List.map2 (fun (_,ise) e ->
 			let e, et = (match e.eexpr with
 				(* get back our index and real expression *)

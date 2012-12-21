@@ -27,7 +27,7 @@
  *  - cpp target does not like removing unused overridden fields
  *  - most targets seem to require keeping a property field even if it is used only through its accessor methods
  *  - I did not consider inlining at all because I'm pretty sure I don't have to at this compilation stage
- * 
+ *
  *)
 
 open Ast
@@ -123,10 +123,21 @@ let rec mark_t dce t = match follow t with
 			List.iter (mark_t dce) tl;
 		end;
 		List.iter (mark_t dce) pl
-	| TInst(c,pl) -> mark_class dce c; List.iter (mark_t dce) pl
-	| TFun(args,ret) -> List.iter (fun (_,_,t) -> mark_t dce t) args; mark_t dce ret
-	| TEnum(e,pl) -> if not (has_meta ":used" e.e_meta) then e.e_meta <- (":used",[],e.e_pos) :: e.e_meta; List.iter (mark_t dce) pl
-	| TAbstract(a,pl) -> if not (has_meta ":used" a.a_meta) then a.a_meta <- (":used",[],a.a_pos) :: a.a_meta; List.iter (mark_t dce) pl
+	| TInst(c,pl) ->
+		mark_class dce c;
+		List.iter (mark_t dce) pl
+	| TFun(args,ret) ->
+		List.iter (fun (_,_,t) -> mark_t dce t) args;
+		mark_t dce ret
+	| TEnum(e,pl) ->
+		if not (has_meta ":used" e.e_meta) then begin
+			e.e_meta <- (":used",[],e.e_pos) :: e.e_meta;
+			PMap.iter (fun _ ef -> mark_t dce ef.ef_type) e.e_constrs;
+		end;
+		List.iter (mark_t dce) pl
+	| TAbstract(a,pl) ->
+		if not (has_meta ":used" a.a_meta) then a.a_meta <- (":used",[],a.a_pos) :: a.a_meta;
+		List.iter (mark_t dce) pl
 	| TLazy _ | TDynamic _ | TAnon _ | TType _ | TMono _ -> ()
 
 (* find all dependent fields by checking implementing/subclassing types *)
@@ -163,7 +174,6 @@ let rec field dce c n stat =
 			| Some cf -> cf
 		else PMap.find n (if stat then c.cl_statics else c.cl_fields)
 	in
-	let not_found () = if dce.debug then prerr_endline ("[DCE] Field " ^ n ^ " not found on " ^ (s_type_path c.cl_path)) else () in
 	(try
 		let cf = find_field n in
 		mark_field dce c cf stat;
@@ -181,20 +191,34 @@ let rec field dce c n stat =
 			in
 			(match prefix,cf.cf_kind with
 				| "get_",Var {v_read = AccCall s} when s = n -> keep()
-				| "set_",Var {v_write = AccCall s} when s = n -> keep()	
+				| "set_",Var {v_write = AccCall s} when s = n -> keep()
 				| _ -> raise Not_found
 			);
 		end;
 		raise Not_found
-	with Not_found ->
+	with Not_found -> try
 		if c.cl_interface then begin
 			let rec loop cl = match cl with
-				| [] -> not_found()
+				| [] -> raise Not_found
 				| (c,_) :: cl ->
 					try field dce c n stat with Not_found -> loop cl
 			in
 			loop c.cl_implements
-		end else match c.cl_super with Some (csup,_) -> field dce csup n stat | None -> not_found())
+		end else match c.cl_super with Some (csup,_) -> field dce csup n stat | None -> raise Not_found
+	with Not_found -> try
+		match c.cl_kind with
+		| KTypeParameter tl ->
+			let rec loop tl = match tl with
+				| [] -> raise Not_found
+				| TInst(c,_) :: cl ->
+					(try field dce c n stat with Not_found -> loop cl)
+				| t :: tl ->
+					loop tl
+			in
+			loop tl
+		| _ -> raise Not_found
+	with Not_found ->
+		if dce.debug then prerr_endline ("[DCE] Field " ^ n ^ " not found on " ^ (s_type_path c.cl_path)) else ())
 
 and expr dce e =
 	match e.eexpr with
@@ -304,11 +328,15 @@ let run com main full =
 				(match !(a.a_status) with
 				| Statics c ->
 					let cf = PMap.find "main" c.cl_statics in
-					loop [c,cf,true] com.types
+					if not ((keep_whole_class dce c) || (keep_field dce cf)) then
+						loop [c,cf,true] com.types
+					else
+						(* field will be added by loop *)
+						loop [] com.types
 				| _ -> assert false)
 			| _ -> assert false)
 		| _ -> loop [] com.types
-	in	
+	in
 	if dce.debug then begin
 		List.iter (fun (c,cf,_) -> match cf.cf_expr with
 			| None -> ()
@@ -318,12 +346,12 @@ let run com main full =
 
 	(* second step: initiate DCE passes and keep going until no new fields were added *)
 	let rec loop cfl =
-		(* extend to dependent (= overriding/implementing) class fields *)	
+		(* extend to dependent (= overriding/implementing) class fields *)
 		List.iter (fun (c,cf,stat) -> mark_dependent_fields dce c cf.cf_name stat) cfl;
 		(* mark fields as used *)
 		List.iter (fun (c,cf,stat) -> mark_field dce c cf stat; mark_t dce cf.cf_type) cfl;
 		(* follow expressions to new types/fields *)
-		List.iter (fun (_,cf,_) -> opt (expr dce) cf.cf_expr) cfl;		
+		List.iter (fun (_,cf,_) -> opt (expr dce) cf.cf_expr) cfl;
 		match dce.added_fields with
 		| [] -> ()
 		| cfl ->
@@ -391,7 +419,7 @@ let run com main full =
 				| Var {v_write = AccCall s; v_read = a} ->
 					cf.cf_kind <- Var {v_write = if has_accessor c s stat then AccCall s else AccNever; v_read = a}
 				| _ -> ())
-			in		
+			in
 			List.iter (check_prop true) c.cl_ordered_statics;
 			List.iter (check_prop false) c.cl_ordered_fields;
 		| _ -> ()

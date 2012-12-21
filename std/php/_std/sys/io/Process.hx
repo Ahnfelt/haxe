@@ -23,10 +23,10 @@ package sys.io;
 import php.NativeArray;
 
 private class Stdin extends haxe.io.Output {
-	var p : Void;
+	var p : Dynamic;
 	var buf : haxe.io.Bytes;
 
-	public function new(p) {
+	public function new(p:Dynamic) {
 		this.p = p;
 		buf = haxe.io.Bytes.alloc(1);
 	}
@@ -51,10 +51,10 @@ private class Stdin extends haxe.io.Output {
 }
 
 private class Stdout extends haxe.io.Input {
-	var p : Void;
+	var p : Dynamic;
 	var buf : haxe.io.Bytes;
 
-	public function new(p) {
+	public function new(p:Dynamic) {
 		this.p = p;
 		buf = haxe.io.Bytes.alloc(1);
 	}
@@ -78,7 +78,7 @@ private class Stdout extends haxe.io.Input {
 
 @:coreApi
 class Process {
-	var p : Void;
+	var p : Dynamic;
 	var st : NativeArray;
 	var cl : Int;
 	public var stdout(default,null) : haxe.io.Input;

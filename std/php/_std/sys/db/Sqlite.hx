@@ -23,8 +23,8 @@ package sys.db;
 
 private class SqliteConnection implements Connection {
 
-	var c : Void;
-	var e : Void;
+	var c : Dynamic;
+	var e : Dynamic;
 
 	public function new( file : String ) {
 		c = untyped __call__("sqlite_open", file, 0666, e);
@@ -95,7 +95,7 @@ private class SqliteResultSet implements ResultSet {
 
 	public var length(get,null) : Int;
 	public var nfields(get,null) : Int;
-	var r : Void;
+	var r : Dynamic;
 	var cache : Dynamic;
 
 	public function new( r ) {

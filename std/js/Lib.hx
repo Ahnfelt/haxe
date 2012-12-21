@@ -21,12 +21,8 @@
  */
 package js;
 
-import js.Dom;
-
 class Lib {
 
-	public static var document : Document;
-	public static var window : Window;
 	static var onerror : String -> Array<String> -> Bool = null;
 
 	/**
@@ -52,11 +48,8 @@ class Lib {
 	}
 
 	static function __init__() {
-		if( untyped __js__("typeof document") != "undefined" )
-			document = untyped __js__("document");
 		if( untyped __js__("typeof window") != "undefined" ) {
-			window = untyped __js__("window");
-			window.onerror = function( msg, url, line ) {
+			(untyped window).onerror = function( msg, url, line ) {
 				var f = Lib.onerror;
 				if( f == null )
 					return false;
