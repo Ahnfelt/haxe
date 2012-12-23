@@ -272,15 +272,17 @@
 		}
 
 		Array<String> ret = new Array<String>();
-		for (java.lang.reflect.Field f : c.getDeclaredFields())
+		for (java.lang.reflect.Field f : c.getFields())
 		{
 			java.lang.String fname = f.getName();
 			if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) && !fname.startsWith("__hx_"))
 				ret.push(fname);
 		}
 
-		for (java.lang.reflect.Method m : c.getDeclaredMethods())
+		for (java.lang.reflect.Method m : c.getMethods())
 		{
+			if (m.getDeclaringClass() == java.lang.Object.class)
+				continue;
 			java.lang.String mname = m.getName();
 			if (!java.lang.reflect.Modifier.isStatic(m.getModifiers()) && !mname.startsWith("__hx_"))
 				ret.push(mname);
@@ -309,6 +311,8 @@
 
 		for (java.lang.reflect.Method m : c.getDeclaredMethods())
 		{
+			if (m.getDeclaringClass() == java.lang.Object.class)
+				continue;
 			java.lang.String mname = m.getName();
 			if (java.lang.reflect.Modifier.isStatic(m.getModifiers()) && !mname.startsWith("__hx_"))
 				ret.push(mname);
@@ -322,7 +326,7 @@
 
 	public static function getEnumConstructs( e : Enum<Dynamic> ) : Array<String> {
 		if (Reflect.hasField(e, "constructs"))
-			return untyped e.constructs;
+			return untyped e.constructs.copy();
 		return getClassFields(cast e);
 	}
 
