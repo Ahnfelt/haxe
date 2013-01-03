@@ -1984,6 +1984,8 @@ and type_expr ctx ?(need_val=true) (e,p) =
 	| EField ((EConst (String s),p),"code") ->
 		if UTF8.length s <> 1 then error "String must be a single UTF8 char" p;
 		mk (TConst (TInt (Int32.of_int (UChar.code (UTF8.get s 0))))) ctx.t.tint p
+	| EField(_,n) when n.[0] = '$' ->
+		error "Field names starting with $ are not allowed" p
 	| EField _
 	| EArray _
 	| EConst (Ident _) ->
@@ -3108,6 +3110,9 @@ let make_macro_api ctx p =
 			match ctx.g.get_build_infos() with
 			| None -> Interp.VNull
 			| Some (_,fields) -> Interp.enc_array (List.map Interp.encode_field fields)
+		);
+		Interp.get_pattern_locals = (fun e t ->
+			!get_pattern_locals_ref ctx e t
 		);
 		Interp.define_type = (fun v ->
 			let m, tdef, pos = (try Interp.decode_type_def v with Interp.Invalid_expr -> Interp.exc (Interp.VString "Invalid type definition")) in
