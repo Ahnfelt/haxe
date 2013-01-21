@@ -83,7 +83,7 @@ let rec classify t =
 	| TInst ({ cl_path = ([],"String") },[]) -> KString
 	| TAbstract ({ a_path = [],"Int" },[]) -> KInt
 	| TAbstract ({ a_path = [],"Float" },[]) -> KFloat
-	| TAbstract (a,[]) when List.exists (fun t -> match classify t with KInt | KFloat -> true | _ -> false) a.a_to -> KParam t
+	| TAbstract (a,[]) when List.exists (fun (t,_) -> match classify t with KInt | KFloat -> true | _ -> false) a.a_to -> KParam t
 	| TInst ({ cl_kind = KTypeParameter ctl },_) when List.exists (fun t -> match classify t with KInt | KFloat -> true | _ -> false) ctl -> KParam t
 	| TMono r when !r = None -> KUnk
 	| TDynamic _ -> KDyn
@@ -2535,7 +2535,7 @@ and type_expr ctx (e,p) (with_type:with_type) =
 							()
 						else begin
 							let f = prepare_using_field f in
-							let f = { f with cf_params = []; cf_public = true } in
+							let f = { f with cf_params = []; cf_public = true; cf_type = TFun(args,ret) } in
 							acc := PMap.add f.cf_name f (!acc)
 						end
 					| _ -> ()
