@@ -124,7 +124,7 @@ private class MysqlResultSet implements ResultSet {
 		return _fieldsDesc;
 	}
 
-	private function convert(v : String, type : String) : Dynamic {
+	private function convert(v : Dynamic, type : String) : Dynamic {
 		if (v == null) return v;
 		switch(type) {
 			case "int", "year":
