@@ -93,6 +93,9 @@ class TestOps extends Test {
 		eq( -x--, -2);
 		
 		eq( ("bla" + "x").indexOf("x"), 3);
+		
+		eq(5 * @foo 3 + 4, 19);
+		eq(5 * @foo @bar 3 + @baz 4, 19);
 	}
 
 }
