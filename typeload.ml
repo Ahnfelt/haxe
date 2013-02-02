@@ -105,6 +105,7 @@ let make_module ctx mpath file tdecls loadp =
 				a_meta = d.d_meta;
 				a_from = [];
 				a_to = [];
+				a_ops = [];
 				a_impl = None;
 				a_this = mk_mono();
 			} in
@@ -834,9 +835,12 @@ let rec type_type_params ctx path get_params p tp =
 		n, t
 	| _ ->
 		let r = exc_protect ctx (fun r ->
-			r := (fun _ -> t);
+			r := (fun _ -> error "Recursive constraint parameter is now allowed" p);
 			let ctx = { ctx with type_params = ctx.type_params @ get_params() } in
-			c.cl_kind <- KTypeParameter (List.map (load_complex_type ctx p) tp.tp_constraints);
+			let constr = List.map (load_complex_type ctx p) tp.tp_constraints in
+			List.iter (fun t -> ignore(follow t)) constr; (* force other constraints evaluation to check recursion *)
+			c.cl_kind <- KTypeParameter constr;
+			r := (fun _ -> t);
 			t
 		) "constraint" in
 		delay ctx PForce (fun () -> ignore(!r()));
@@ -1359,6 +1363,12 @@ let init_class ctx c p context_init herits fields =
 						a.a_to <- (follow m, Some cf) :: a.a_to
 					end else if f.cff_name = "_new" && Meta.has Meta.Generic a.a_meta then
 						do_bind := false
+					else (try match Meta.get Meta.Op cf.cf_meta with
+						| _,[EBinop(op,_,_),_],_ ->
+							a.a_ops <- (op,cf) :: a.a_ops;
+							if fd.f_expr = None then do_bind := false;
+						| _ -> ()
+						with Not_found -> ())
 				| _ ->
 					());
 			init_meta_overloads ctx cf;
@@ -1509,7 +1519,8 @@ let init_class ctx c p context_init herits fields =
 	(match c.cl_kind with
 	| KAbstractImpl a ->
 		a.a_to <- List.rev a.a_to;
-		a.a_from <- List.rev a.a_from
+		a.a_from <- List.rev a.a_from;
+		a.a_ops <- List.rev a.a_ops;
 	| _ -> ());
 	c.cl_ordered_statics <- List.rev c.cl_ordered_statics;
 	c.cl_ordered_fields <- List.rev c.cl_ordered_fields;
