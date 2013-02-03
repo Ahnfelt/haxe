@@ -19,40 +19,46 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-@:coreApi class IntHash<T> {
+package haxe.ds;
+
+@:coreApi class StringMap<T> {
 
 	private var h : Dynamic;
 
 	public function new() : Void {
-		h = untyped __dollar__hnew(0);
+		h = untyped __new__(_global["Object"]);
 	}
 
-	public inline function set( key : Int, value : T ) : Void {
-		untyped __dollar__hset(h,key,value,null);
+	public function set( key : String, value : T ) : Void {
+		untyped h["$"+key] = value;
 	}
 
-	public function get( key : Int ) : Null<T> {
-		return untyped __dollar__hget(h,key,null);
+	public function get( key : String ) : Null<T> {
+		return untyped h["$"+key];
 	}
 
-	public inline function exists( key : Int ) : Bool {
-		return untyped __dollar__hmem(h,key,null);
+	public function exists( key : String ) : Bool {
+		return untyped h["hasOwnProperty"]("$"+key);
 	}
 
-	public inline function remove( key : Int ) : Bool {
-		return untyped __dollar__hremove(h,key,null);
+	public function remove( key : String ) : Bool {
+		key = "$"+key;
+		if( untyped !h["hasOwnProperty"](key) ) return false;
+		untyped __delete__(h,key);
+		return true;
 	}
 
-	public function keys() : Iterator<Int> {
-		var l = new List<Int>();
-		untyped __dollar__hiter(h,function(k,_) { l.push(k); });
-		return l.iterator();
+	public function keys() : Iterator<String> {
+		return untyped (__hkeys__(h))["iterator"]();
 	}
 
 	public function iterator() : Iterator<T> {
-		var l = new List<T>();
-		untyped __dollar__hiter(h,function(_,v) { l.push(v); });
-		return l.iterator();
+		return untyped {
+			ref : h,
+			it : __keys__(h)["iterator"](),
+			hasNext : function() { return __this__.it[__unprotect__("hasNext")](); },
+			next : function() { var i = __this__.it[__unprotect__("next")](); return __this__.ref[i]; }
+		};
 	}
 
 	public function toString() : String {

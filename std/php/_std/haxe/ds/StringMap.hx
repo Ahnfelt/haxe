@@ -19,65 +19,65 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-@:coreApi class IntHash<T> {
+package haxe.ds;
 
-	private var h : Dynamic;
+@:coreApi class StringMap<T> implements php.IteratorAggregate<T> {
+	private var h : ArrayAccess<T>;
 
 	public function new() : Void {
-		h = {};
+		h = untyped __call__('array');
 	}
 
-	public function set( key : Int, value : T ) : Void {
+	public function set( key : String, value : T ) : Void {
 		untyped h[key] = value;
 	}
 
-	public function get( key : Int ) : Null<T> {
-		return untyped h[key];
+	public function get( key : String ) : Null<T> {
+		if (untyped __call__("array_key_exists", key, h))
+			return untyped h[key];
+		else
+			return null;
 	}
 
-	public function exists( key : Int ) : Bool {
-		return untyped h.hasOwnProperty(key);
+	public function exists( key : String ) : Bool {
+		return untyped __call__("array_key_exists", key, h);
 	}
 
-	public function remove( key : Int ) : Bool {
-		if( untyped !h.hasOwnProperty(key) ) return false;
-		untyped  __js__("delete")(h[key]);
-		return true;
+	public function remove( key : String ) : Bool {
+		if (untyped __call__("array_key_exists", key, h)) {
+			untyped __call__("unset", h[key]);
+			return true;
+		} else
+			return false;
 	}
 
-	public function keys() : Iterator<Int> {
-		var a = [];
-		untyped {
-			__js__("for( var key in this.h ) {");
-				if( h.hasOwnProperty(key) )
-					a.push(key|0);
-			__js__("}");
-		}
-		return a.iterator();
+	public function keys() : Iterator<String> {
+		return untyped __call__("new _hx_array_iterator", __call__("array_keys", h));
 	}
 
 	public function iterator() : Iterator<T> {
-		return untyped {
-			ref : h,
-			it : keys(),
-			hasNext : function() { return __this__.it.hasNext(); },
-			next : function() { var i = __this__.it.next(); return __this__.ref[i]; }
-		};
+		return untyped __call__("new _hx_array_iterator", __call__("array_values", h));
 	}
 
 	public function toString() : String {
-		var s = new StringBuf();
-		s.add("{");
+		var s = "{";
 		var it = keys();
 		for( i in it ) {
-			s.add(i);
-			s.add(" => ");
-			s.add(Std.string(get(i)));
+			s += i;
+			s += " => ";
+			s += Std.string(get(i));
 			if( it.hasNext() )
-				s.add(", ");
+				s += ", ";
 		}
-		s.add("}");
-		return s.toString();
+		return s + "}";
 	}
 
+	/**
+		Implement IteratorAggregate for native php iteration
+	**/
+	#if php
+	function getIterator() : Iterator<T> {
+		return iterator();
+	}
+	#end
 }

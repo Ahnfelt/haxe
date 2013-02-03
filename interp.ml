@@ -3444,7 +3444,7 @@ let enc_string s =
 	]
 
 let enc_hash h =
-	enc_inst ["Hash"] [
+	enc_inst ["haxe";"ds";"StringMap"] [
 		"h", VAbstract (AHash h);
 	]
 

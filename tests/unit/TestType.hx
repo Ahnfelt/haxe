@@ -559,7 +559,7 @@ class TestType extends Test {
 		gf1(new haxe.Template("foo"));
 		#end
 
-		gf1(new haxe.FastList<Int>());
+		gf1(new haxe.ds.GenericStack<Int>());
 		hsf(TestType, "gf1_Int");
 		hsf(TestType, "gf1_String");
 		hsf(TestType, "gf1_Bool");
@@ -568,7 +568,7 @@ class TestType extends Test {
 		hsf(TestType, "gf1_haxe_Template");
 		#end
 
-		hsf(TestType, #if (flash9 || cpp) "gf1_haxe_FastList_Int" #else "gf1_haxe_FastList" #end);
+		hsf(TestType, #if (flash9 || cpp) "gf1_haxe_ds_GenericStack_Int" #else "gf1_haxe_ds_GenericStack" #end);
 		t(typeError(gf1(null))); // monos don't work
 		t(typeError(gf1( { foo:1 } ))); // structures don't work
 
@@ -689,11 +689,20 @@ class TestType extends Test {
 	function testAbstractGeneric() {
 		var map = new Map();
 		map.set("foo", 1);
-		t(Std.is(map, Hash));
+		t(Std.is(map, haxe.ds.StringMap));
 
 		var map = new Map();
 		_mapMe(map); // infer from function call
 		t(Std.is(map, haxe.ds.IntMap));
+
+		var map = new Map();
+		var a = new unit.MyAbstract.ClassWithHashCode(1);
+		var b = new unit.MyAbstract.ClassWithHashCode(2);
+		map.set(a, "foo");
+		map.set(b, "bar");
+		eq(map.get(a), "foo");
+		eq(map.get(b), "bar");
+		t(Std.is(map, haxe.ds.HashMap));
 
 		//var map = new unit.MyAbstract.MyMap();
 		//map.set(new haxe.Template("foo"), 99);

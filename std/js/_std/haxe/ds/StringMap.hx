@@ -19,12 +19,14 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-@:coreApi class Hash<T> {
+package haxe.ds;
+
+@:coreApi class StringMap<T> {
 
 	private var h : Dynamic;
 
 	public function new() : Void {
-		h = untyped __new__(_global["Object"]);
+		h = {};
 	}
 
 	public function set( key : String, value : T ) : Void {
@@ -36,26 +38,33 @@
 	}
 
 	public function exists( key : String ) : Bool {
-		return untyped h["hasOwnProperty"]("$"+key);
+		return untyped h.hasOwnProperty("$"+key);
 	}
 
 	public function remove( key : String ) : Bool {
 		key = "$"+key;
-		if( untyped !h["hasOwnProperty"](key) ) return false;
-		untyped __delete__(h,key);
+		if( untyped !h.hasOwnProperty(key) ) return false;
+		untyped __js__("delete")(h[key]);
 		return true;
 	}
 
 	public function keys() : Iterator<String> {
-		return untyped (__hkeys__(h))["iterator"]();
+		var a = [];
+		untyped {
+			__js__("for( var key in this.h ) {");
+				if( h.hasOwnProperty(key) )
+					a.push(key.substr(1));
+			__js__("}");
+		}
+		return a.iterator();
 	}
 
 	public function iterator() : Iterator<T> {
 		return untyped {
 			ref : h,
-			it : __keys__(h)["iterator"](),
-			hasNext : function() { return __this__.it[__unprotect__("hasNext")](); },
-			next : function() { var i = __this__.it[__unprotect__("next")](); return __this__.ref[i]; }
+			it : keys(),
+			hasNext : function() { return __this__.it.hasNext(); },
+			next : function() { var i = __this__.it.next(); return __this__.ref["$"+i]; }
 		};
 	}
 
