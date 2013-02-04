@@ -23,12 +23,12 @@
 package haxe.ds;
 
 @:coreApi
-abstract ObjectMap(StringMap<V>) < K: { }, V > {
+abstract ObjectMap <K:{ }, V>(StringMap<V>) {
 	static function getId(key: { } ) {
 		return untyped __php__("spl_object_hash($key)");
 	}
 	
-	public function new() {
+	public function new(weakKeys:Bool = false) {
 		this = new StringMap<V>();
 	}
 	
