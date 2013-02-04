@@ -39,7 +39,7 @@ type cache = {
 exception Abort
 exception Completion of string
 
-let version = 211
+let version = 300
 
 let measure_times = ref false
 let prompt = ref false
@@ -80,6 +80,10 @@ let deprecated = [
 	"Class not found : Hash","Hash was moved to haxe.ds.StringMap";
 	"Class not found : IntHash","IntHash was moved to haxe.ds.IntMap";
 	"Class not found : haxe.FastList","haxe.FastList was moved to haxe.ds.GenericStack";
+	"#Std has no field format","Std.format has been removed, use single quote 'string ${escape}' syntax instead";
+	"Class not found : Int32","Int32 has been removed, use Int instead";
+	"Identifier 'EType' is not part of enum haxe.macro.ExprDef","EType has been removed, use EField instead";
+	"Identifier 'CType' is not part of enum haxe.macro.Constant","CType has been removed, use CIdent instead";
 ]
 
 let error ctx msg p =
@@ -738,7 +742,6 @@ try
 			Common.raw_define com ("haxe_" ^ string_of_int v);
 		done;
 	end else begin
-		Common.define com Define.Haxe3;
 		Common.define_value com Define.HaxeVer (string_of_float (float_of_int version /. 100.));
 	end;
 	Common.define_value com Define.Dce "std";
