@@ -153,13 +153,6 @@ is probably to [report an issue][15].
 Acknowledgements
 ----------------
 
-[Philipp Klose][16] created a [similar Haxe mirror on GitHub][17] before I
-did. Although he did a fine job of it, it didn’t work well for me on Windows,
-and I spent quite a bit of time figuring out the most sensible sequence of
-changes to make it work, before giving up and starting again. That’s more my
-fault than his, although I’m happier with the way things are set up here.
-This README is largely based on the one in his repository.
-
 Haxe itself is developed by many people, very few of whom are me.
 
 
@@ -178,8 +171,6 @@ Haxe itself is developed by many people, very few of whom are me.
   [13]: http://code.google.com/p/haxe/issues/list "Haxe issue tracker"
   [14]: mailto:mail@danielcassidy.me.uk "Daniel Cassidy"
   [15]: https://github.com/haxe-mirrors/haxe/issues "Issues"
-  [16]: https://github.com/TheHippo "TheHippo (Philipp Klose) on GitHub"
-  [17]: https://github.com/TheHippo/haxe "TheHippo/haxe on GitHub"
   [18]: https://github.com/haxe-mirrors/haxe/tree/haxe/master "haxe/master branch"
   [19]: http://code.google.com/p/haxe/source/browse/trunk/ "Browse Haxe SVN trunk"
   [20]: https://github.com/haxe-mirrors/haxe/tree/ocamllibs/master "ocamllibs/master branch"
