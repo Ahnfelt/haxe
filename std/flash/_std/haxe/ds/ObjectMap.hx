@@ -1,5 +1,6 @@
 package haxe.ds;
 
+@:coreApi
 class ObjectMap<K,V> extends flash.utils.Dictionary {
 
 	public inline function get( key : K ) : Null<V> {
@@ -20,8 +21,8 @@ class ObjectMap<K,V> extends flash.utils.Dictionary {
 		return has;
 	}
 
-	public function keys() : Array<K> {
-		return untyped __keys__(this);
+	public function keys() : Iterator<K> {
+		return untyped __keys__(this).iterator();
 	}
 
 	public function iterator() : Iterator<V> {
