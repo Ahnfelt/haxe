@@ -363,8 +363,8 @@ function _hx_field($o, $field) {
 							return $o->$field;
 						}
 					}
-				} else if(isset($o->»dynamics[$field])) {
-					return $o->»dynamics[$field];
+				} else if(isset($o->__dynamics[$field])) {
+					return $o->__dynamics[$field];
 				} else {
 					return array($o, $field);
 				}
@@ -377,8 +377,8 @@ function _hx_field($o, $field) {
 
 function _hx_get_object_vars($o) {
 	$a = array_keys(get_object_vars($o));
-	if(isset($o->»dynamics))
-		$a = array_merge($a, array_keys($o->»dynamics));
+	if(isset($o->__dynamics))
+		$a = array_merge($a, array_keys($o->__dynamics));
 	$arr = array();
 	for($i=0;$i<count($a); $i++)
 	{
@@ -391,7 +391,7 @@ function _hx_get_object_vars($o) {
 
 function _hx_has_field($o, $field) {
 	return
-		(is_object($o) && (method_exists($o, $field) || isset($o->$field) || property_exists($o, $field) || isset($o->»dynamics[$field])))
+		(is_object($o) && (method_exists($o, $field) || isset($o->$field) || property_exists($o, $field) || isset($o->__dynamics[$field])))
 		||
 		(is_string($o) && (in_array($field, array('toUpperCase', 'toLowerCase', 'charAt', 'charCodeAt', 'indexOf', 'lastIndexOf', 'split', 'substr', 'toString', 'length'))))
 	;
@@ -413,7 +413,7 @@ function _hx_instanceof($v, $t) {
 		case 'Array'  : return is_array($v);
 		case 'String' : return is_string($v) && !_hx_is_lambda($v);
 		case 'Bool'   : return is_bool($v);
-		case 'Int'    : return is_int($v) || (is_float($v) && intval($v) == $v && !is_nan($v));
+		case 'Int'    : return (is_int($v) || (is_float($v) && intval($v) == $v && !is_nan($v))) && abs($v) <= 0x80000000;
 		case 'Float'  : return is_float($v) || is_int($v);
 		case 'Dynamic': return true;
 		case 'Class'  : return ($v instanceof _hx_class || $v instanceof _hx_interface) && $v->__tname__ != 'Enum';
