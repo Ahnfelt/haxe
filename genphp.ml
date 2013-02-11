@@ -773,8 +773,10 @@ and gen_member_access ctx isvar e s =
 	match follow e.etype with
 	| TAnon a ->
 		(match !(a.a_status) with
-		| EnumStatics _
-		| Statics _ -> print ctx "::%s%s" (if isvar then "$" else "") (s_ident s)
+		| EnumStatics _ ->
+			print ctx "::%s%s" (if isvar then "$" else "") s
+		| Statics _ ->
+			print ctx "::%s%s" (if isvar then "$" else "") (s_ident s)
 		| _ -> print ctx "->%s" (s_ident_field s))
 	| _ -> print ctx "->%s" (s_ident_field s)
 
@@ -2000,12 +2002,6 @@ let generate_inline_method ctx c m =
 	ctx.nested_loops <- ctx.nested_loops - 1;
 	let block = open_block ctx in
 	newline ctx;
-
-	(* blocks *)
-	if ctx.com.debug then begin
-		spr ctx "$__hx__spos = $GLOBALS['%s']->length";
-		newline ctx;
-	end;
 
 	gen_expr ctx m.iexpr;
 	block();
