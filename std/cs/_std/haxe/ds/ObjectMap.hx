@@ -23,7 +23,7 @@ package haxe.ds;
 
 import cs.NativeArray;
 
-@:coreApi class StringMap<T>
+@:coreApi class ObjectMap<K, T>
 {
 	@:extern private static inline var HASH_UPPER = 0.77;
 	@:extern private static inline var FLAG_EMPTY = 0;
@@ -38,7 +38,7 @@ import cs.NativeArray;
 	 * The insertion algorithm will do the same but will also break when FLAG_DEL is found;
 	 */
 	private var hashes:NativeArray<HashType>;
-	private var _keys:NativeArray<String>;
+	private var _keys:NativeArray<K>;
 	private var vals:NativeArray<T>;
 
 	private var nBuckets:Int;
@@ -46,7 +46,7 @@ import cs.NativeArray;
 	private var nOccupied:Int;
 	private var upperBound:Int;
 
-	private var cachedKey:String;
+	private var cachedKey:K;
 	private var cachedIndex:Int;
 
 #if DEBUG_HASHTBL
@@ -56,12 +56,12 @@ import cs.NativeArray;
 	private var maxProbe:Int;
 #end
 
-	public function new() : Void
+	public function new(?weakKeys:Bool) : Void
 	{
 		cachedIndex = -1;
 	}
 
-	public function set( key : String, value : T ) : Void
+	public function set( key : K, value : T ) : Void
 	{
 		var x:Int, k:Int;
 		if (nOccupied >= upperBound)
@@ -126,7 +126,7 @@ import cs.NativeArray;
 		cachedKey = key;
 	}
 
-	@:final private function lookup( key : String ) : Int
+	@:final private function lookup( key : K ) : Int
 	{
 		if (nBuckets != 0)
 		{
@@ -260,7 +260,7 @@ import cs.NativeArray;
 		}
 	}
 
-	public function get( key : String ) : Null<T>
+	public function get( key : K ) : Null<T>
 	{
 		var idx = -1;
 		if (cachedKey == key && ( (idx = cachedIndex) != -1 ))
@@ -280,7 +280,7 @@ import cs.NativeArray;
 		return null;
 	}
 
-	private function getDefault( key : String, def : T ) : T
+	private function getDefault( key : K, def : T ) : T
 	{
 		var idx = -1;
 		if (cachedKey == key && ( (idx = cachedIndex) != -1 ))
@@ -300,7 +300,7 @@ import cs.NativeArray;
 		return def;
 	}
 
-	public function exists( key : String ) : Bool
+	public function exists( key : K ) : Bool
 	{
 		var idx = -1;
 		if (cachedKey == key && ( (idx = cachedIndex) != -1 ))
@@ -320,7 +320,7 @@ import cs.NativeArray;
 		return false;
 	}
 
-	public function remove( key : String ) : Bool
+	public function remove( key : K ) : Bool
 	{
 		var idx = -1;
 		if (! (cachedKey == key && ( (idx = cachedIndex) != -1 )))
@@ -348,7 +348,7 @@ import cs.NativeArray;
 		Returns an iterator of all keys in the hashtable.
 		Implementation detail: Do not set() any new value while iterating, as it may cause a resize, which will break iteration
 	**/
-	public function keys() : Iterator<String>
+	public function keys() : Iterator<K>
 	{
 		var i = 0;
 		var len = nBuckets;
@@ -446,7 +446,7 @@ import cs.NativeArray;
 		return v == FLAG_DEL;
 
 	//guarantee: Whatever this function is, it will never return 0 nor 1
-	@:extern private static inline function hash(s:String):HashType
+	@:extern private static inline function hash<K>(s:K):HashType
 	{
 		var k:Int = untyped s.GetHashCode();
 		//k *= 357913941;
